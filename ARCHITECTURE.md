@@ -8,17 +8,19 @@ rust-claw runs the whole app in one container and agents as plain child processe
 
 ```
 web UI (built-in) ──┐
-future adapters ────┼──▶ claw (router) ──▶ session.db ──▶ pi (agent, child process) ──▶ session.db ──▶ claw (delivery) ──▶ web UI / adapters
+future adapters ────┼──▶ claw (router) ──▶ session.db ──▶ native agent loop (in-process) ──▶ session.db ──▶ claw (delivery) ──▶ web UI / adapters
                     │         one process, one container, one /data volume
 ```
 
 Three deliberate departures from upstream, decided up front:
 
 1. **Built-in web interface** is the primary channel (no Telegram/WhatsApp adapter in trunk).
-2. **No per-agent Docker.** The app itself is dockerized; agents are child processes on a shared
-   persistent filesystem. Agent runs are **strictly sequential** (global FIFO queue, one at a time).
-3. **[pi](https://github.com/badlogic/pi-mono) is the agent**, driven over its RPC mode
-   (JSONL on stdin/stdout), instead of the Claude Agent SDK / claude CLI.
+2. **No per-agent Docker.** The app itself is dockerized; agent runs are **strictly sequential**
+   (global FIFO queue, one at a time) on a shared persistent filesystem.
+3. **The agent is home-made and in-process**: a native chat-completion loop against any
+   OpenAI-compatible endpoint, with messaging tools plus `bash`/`read`/`write`/`edit` for coding
+   groups. No external agent harness — see
+   [docs/decisions/001-drop-pi.md](docs/decisions/001-drop-pi.md) for why pi was built then removed.
 
 ---
 
@@ -26,7 +28,7 @@ Three deliberate departures from upstream, decided up front:
 
 **Goals**
 
-- Small enough to understand: **one crate, one binary** (`claw`), plus a TypeScript tool extension for pi.
+- Small enough to understand: **one crate, one binary** (`claw`), 100 % Rust.
 - Same mental model as NanoClaw: users → messaging groups → agent groups → sessions; all IO between
   router and agent is rows in a session SQLite DB; scheduling is `process_after`/`recurrence` on those rows.
 - Self-contained deployment: `docker compose up`, one volume at `/data`, web UI on one port.
@@ -50,21 +52,18 @@ One image, one container, one volume:
 
 ```
 docker-compose.yml        # claw service, port 8080, volume claw-data:/data
-Dockerfile                # multi-stage:
-                          #   1. rust builder → /claw binary
-                          #   2. runtime: debian-slim + Node 22 + pinned @mariozechner/pi-coding-agent
-                          #      + /claw + pi tool extension
+Dockerfile                # multi-stage: rust builder → debian-slim + /claw binary + CA certs.
+                          # No Node, no external agent — one static-ish binary.
 /data/                    # the persistent world — everything lives here
   central.db              # entities, routing, web message ledger
-  sessions/<group>/<id>/  # session.db + pi session files + inbox/ + outbox/ + workspace scratch
-  groups/<folder>/        # per-agent-group filesystem: AGENT.md, skills/, working files
-  pi/                     # PI_CODING_AGENT_DIR: pi auth tokens, models.json, settings (§8.7)
+  sessions/<group>/<id>/  # session.db + inbox/ + outbox/
+  groups/<folder>/        # per-agent-group filesystem: AGENT.md, working files (= agent cwd)
   logs/
   claw.sock               # admin CLI socket
 ```
 
-The app is stateless outside `/data`. Upgrading = new image + same volume. API keys for pi's providers
-(Anthropic, OpenAI, …) are plain env vars on the container — no credential proxy.
+The app is stateless outside `/data`. Upgrading = new image + same volume. Inference API keys are
+plain env vars on the container or rows in the `endpoints` table (§8.7) — no credential proxy.
 
 ---
 
@@ -80,21 +79,20 @@ The app is stateless outside `/data`. Upgrading = new image + same volume. API k
 │                                                       │ pop (one at a time)
 │  delivery task (1s active / 60s sweep) ◀──reads─┐     ▼                   │
 │  sweep task (60s: due schedules, recurrence,    │  run supervisor task    │
-│              stuck-run watchdog)                │     │ spawn child       │
-│  cli server (unix socket)                       │     ▼                   │
-│                                                 └─ pi --mode rpc          │
-│                                                    (writes messages_out   │
-└────────────────────────────────────────────────────  via tool extension) ─┘
+│              stuck-run watchdog)                │     ▼                   │
+│  cli server (unix socket)                       │  native agent loop      │
+│                                                 │  (LLM ⇄ tools; bash     │
+└─────────────────────────────────────────────────┴── runs as a child) ─────┘
 ```
 
-Exactly two kinds of OS process: the `claw` daemon and, at most, **one** `pi` child at any moment.
-The former NanoClaw "agent-runner" is not a separate binary — it is the **run supervisor** module
-inside `claw` (a tokio task that formats prompts, drives pi over RPC, and manages message status).
-The only other writer to a session DB is pi's tool extension (§9), a child of the supervised process.
+One OS process: the `claw` daemon. The only children are short-lived `bash` tool invocations made
+by coding-profile agent runs. The former NanoClaw "agent-runner" is the **run supervisor** module
+inside `claw` (a tokio task that drives the provider loop and manages message status); the native
+agent loop writes `messages_out` itself through its tools.
 
-**Shutdown:** `CancellationToken` everywhere; SIGTERM → stop accepting work, abort the current pi run
-(its messages reset to `pending`), flush, exit 0. Crash-loop circuit breaker as in upstream
-(file-based exponential backoff, cleared on clean exit).
+**Shutdown:** `CancellationToken` everywhere; SIGTERM → stop accepting work, abort the current
+agent run (its messages reset to `pending`), flush, exit 0. Crash-loop circuit breaker as in
+upstream (file-based exponential backoff, cleared on clean exit).
 
 ---
 
@@ -120,11 +118,14 @@ rust-claw/
     runs/
       queue.rs            #   RunQueue: FIFO + dedup set
       supervisor.rs       #   pop → drain session → run provider → status transitions
-      formatter.rs        #   pending messages → XML prompt
+      formatter.rs        #   pending messages → XML prompt (for prompt-consuming providers)
     providers/
       mod.rs              #   AgentProvider trait + registry
-      pi.rs               #   spawns `pi --mode rpc`, JSONL event translation
-      native.rs           #   in-process chat-completion loop (OpenAI-compatible endpoints)
+      native/             #   THE agent: chat-completion loop (OpenAI-compatible endpoints)
+        client.rs         #     /chat/completions client with tool-calling
+        context.rs        #     transcript → token-budgeted message window
+        tools.rs          #     messaging tools (send_message, schedule_task, send_to_agent)
+        exec.rs           #     coding tools: bash, read, write, edit (coder profile, M4.5/4.6)
       echo.rs             #   no-network test provider
     delivery.rs           # messages_out polling, system actions, channel dispatch
     sweep.rs              # 60s: due schedules → enqueue, recurrence advance, watchdog
@@ -138,8 +139,6 @@ rust-claw/
     cli_server.rs         # unix-socket frame server
     cli_client.rs         # socket client used by the CLI subcommands
     modules/              # optional hooks: permissions, approvals, agent-to-agent
-  pi-extension/
-    claw-tools.ts         # pi extension registering claw tools (send_message, schedule_task, …)
   templates/              # Askama templates (full pages + SSE fragments — one rendering path)
   assets/                 # claw.css (Nord tokens), claw.js (~150 lines SSE/composer),
                           # FiraCodeNerdFont woff2 — embedded into the binary via rust-embed
@@ -157,12 +156,14 @@ operation lets us drop the exotic ones and keep the architectural ones:
 1. **Everything is a message.** Chat, tasks, webhooks, agent commands, agent-to-agent: rows in
    `messages_in` / `messages_out`. Scheduling is `process_after` / `deliver_after` + `recurrence` on
    those rows. No separate scheduler, no RPC between subsystems.
-2. **Per-table single writer.** `claw` writes `messages_in`, `delivered`, `session_routing`,
-   `destinations`; the pi tool extension writes `messages_out`. Enforced by the access layer:
-   the Rust side exposes no insert into `messages_out` (except in `#[cfg(test)]`), the TS extension
-   gets a connection string scoped by convention and review.
-3. **Seq parity:** claw assigns even `seq`, the extension assigns odd. One global ordering across both
-   tables; `edit_message(5)` resolves its table by parity.
+2. **Per-table single writer per role.** The host side (router, delivery) writes `messages_in`,
+   `delivered`, `session_routing`, `destinations`; the agent side (the native loop's tools, on
+   behalf of the run) writes `messages_out`. The roles live in one process now, but the split
+   keeps replay, delivery, and recovery reasoning simple — and keeps the door open for external
+   agent processes later.
+3. **Seq parity:** the host side assigns even `seq` in `messages_in`, agent runs assign odd in
+   `messages_out`. One global ordering across both tables; `edit_message(5)` resolves its table
+   by parity.
 4. **The agent never sees routing.** `platform_id`/`channel_type`/`thread_id` are stripped before
    formatting; replies inherit routing from the row they answer, and the host validates destinations.
 
@@ -229,9 +230,9 @@ CREATE TABLE messages_in (
   source_session_id TEXT                     -- agent-to-agent return path
 );
 
-CREATE TABLE messages_out (                  -- written ONLY by the pi tool extension
+CREATE TABLE messages_out (                  -- written ONLY by agent runs (native tools)
   id TEXT PRIMARY KEY,
-  seq INTEGER UNIQUE,                        -- ODD, extension-assigned
+  seq INTEGER UNIQUE,                        -- ODD, agent-assigned
   in_reply_to TEXT, timestamp TEXT NOT NULL,
   deliver_after TEXT, recurrence TEXT,
   kind TEXT NOT NULL,
@@ -253,22 +254,19 @@ CREATE TABLE session_routing (id INTEGER PRIMARY KEY CHECK (id = 1),
                               channel_type TEXT, platform_id TEXT, thread_id TEXT);
 ```
 
-pi's own conversation state (JSONL session trees) lives beside it — the supervisor passes
-`--session-dir <session folder>/pi/`, so "continuation" is simply *pi finding its newest session
-file in that directory*. No continuation token to persist, rotate, or invalidate.
-
-The session folder is also the run's working directory contract:
+There is no separate conversation store: the transcript across both tables (§8.5) *is* the
+agent's memory — no continuation token to persist, rotate, or invalidate.
 
 ```
 sessions/<group>/<id>/
   session.db
-  pi/                  ← pi session JSONL files (--session-dir)
   inbox/<msg_id>/      ← inbound attachments (O_EXCL create, realpath containment — kept from upstream)
   outbox/<msg_id>/     ← files the agent sends (send_file moves them here)
 ```
 
 Agent runs execute with `cwd = /data/groups/<folder>/` (the agent group workspace: `AGENT.md`
-instructions, skills, persistent working files — pi reads `AGENT.md` natively).
+instructions and persistent working files; `AGENT.md` becomes the system prompt, and the bash/file
+tools operate here).
 
 ---
 
@@ -293,24 +291,23 @@ tune — the queue *is* the policy.
 ```
 pop session →
   loop:
-    batch = messages_in WHERE status='pending' AND due, seq order        (none and first pass? exit)
+    batch = messages_in WHERE status='pending' AND due, seq order        (none? exit loop)
     if all trigger=0 → leave as accumulated context, exit loop
     mark batch 'processing'
-    prompt = formatter::format(batch)                                    (XML, routing stripped)
-    if no live pi child → spawn provider for this session
-    send prompt (or follow_up if mid-conversation) → stream events until agent_end
+    run = provider.start(...)                                            (native: reads transcript itself)
+    stream events until TurnEnd / Error
     mark batch 'completed'                                               (failed on provider error)
-    → loop (messages that arrived during the run are drained on the same pi process)
-  kill pi child, deliver-poke, pop next
+    → loop (messages that arrived during the run are picked up next iteration)
+  touch last_active, pop next
 ```
 
 - **Status transitions are direct `UPDATE`s on `messages_in`** — the supervisor and the DB are in the
   same process; no ack table, no sync step.
 - **Mid-run arrivals**: the router enqueues as usual; if the running session == the arriving session,
-  the supervisor's drain loop picks the rows up on the next iteration and feeds them as pi
-  `follow_up` messages (pi queues them natively).
-- **Watchdog** (in sweep): if a run has produced no RPC events for `max(10 min, declared tool
-  timeout)`, kill the child; its `processing` rows get `tries += 1` and
+  the supervisor's drain loop picks the rows up on the next iteration as a fresh provider turn
+  (the transcript carries the continuity).
+- **Watchdog** (in sweep): if a run has produced no provider events for `max(10 min, declared tool
+  timeout)`, abort it; its `processing` rows get `tries += 1` and
   `process_after = now + 5s·2^tries`, `tries ≥ 5` → `failed`. Same backoff policy as upstream,
   one global subject instead of N containers.
 - **Crash recovery**: on daemon startup, any `processing` row reverts to `pending` (a run cannot
@@ -334,79 +331,65 @@ pub trait AgentProvider: Send + Sync {
 }
 
 pub struct ActiveRun {
-    pub push: mpsc::Sender<FollowUp>,        // steer / follow_up
-    pub events: BoxStream<'static, ProviderEvent>,
-    pub abort: CancellationToken,            // → RPC abort, then SIGTERM, then SIGKILL
+    pub input: mpsc::Sender<String>,         // mid-run follow-ups (provider-defined semantics)
+    pub events: mpsc::Receiver<ProviderEvent>,
+    pub abort: CancellationToken,            // cancels the run (and any tool children)
 }
 ```
 
-### 8.4 The pi provider
+### 8.4 The native provider — THE agent
 
-Spawns `pi --mode rpc --session-dir <dir> [--provider X --model Y]` via `tokio::process` and speaks
-its line-delimited JSON protocol — which maps almost 1:1 onto `ActiveRun`:
+One agent implementation: an **in-process chat-completion loop in Rust**
+([decision 001](docs/decisions/001-drop-pi.md)). The same loop serves fast conversational groups
+(a small MoE chat model fronting the main chat) and coding groups (a dense coder model with
+execution tools) — what differs per group is the model, the endpoint, and the **tool profile**.
+Groups compose: a conversational group delegates real work to a coding group via `send_to_agent`
+(agent-to-agent routing; concierge → worker with zero new machinery).
 
-| claw concept | pi RPC |
-|---|---|
-| start run with prompt | `prompt` command (with optional images) |
-| mid-run message | `steer` / `follow_up` (pi queues; `set_follow_up_mode one-at-a-time`) |
-| abort | `abort` command |
-| watchdog liveness | every emitted event (`message_update`, `tool_execution_*`, …) → `Activity` |
-| turn result | `agent_end` / final `message_end` text → `TurnEnd` |
-| live status in web UI | `tool_execution_start/update` → `Progress` |
-| continuation | none needed — pi auto-resumes from `--session-dir` |
-| per-group model | `set_model` / startup flags from the group's config row |
-
-The `echo` provider (returns the prompt verbatim, no child process) ships in-tree so the entire
-pipeline — web UI → router → queue → supervisor → delivery → web UI — tests without any API key.
-
-### 8.5 The native provider — claw's own conversational agent
-
-The second real `AgentProvider`: an **in-process chat-completion loop in Rust**, no child process.
-Made for fast conversational agent groups (e.g. a small MoE chat model fronting the main chat)
-while pi handles tool-heavy coding/task groups — selectable per agent group, and composable:
-a native conversational group can delegate real work to a pi-backed group via `send_to_agent`
-(existing agent-to-agent routing; concierge → worker with zero new machinery).
-
-- **One client protocol: OpenAI-compatible `/chat/completions`** (`reqwest`). That single protocol
-  covers OpenRouter, llama.cpp, vLLM, Ollama, and most hosted gateways — endpoint selection is
-  data (§8.7), not code.
+- **One client protocol: OpenAI-compatible `/chat/completions`** (`reqwest`), with tool-calling.
+  That single protocol covers OpenRouter, llama.cpp, vLLM, Ollama, and most hosted gateways —
+  endpoint selection is data (§8.7), not code.
 - **Memory is the session DB.** No provider-side session state: the loop rebuilds context from
   `messages_in`/`messages_out` (already the full conversation) with a token-budgeted window.
-  Session reset/replay semantics are identical to pi's for free.
-- **Native tools, messaging only:** `send_message`, `ask_user_question`, `schedule_task`,
-  `send_to_agent` — implemented as Rust functions over the same DB writes the pi extension does
-  (the supervisor process is allowed to write `messages_out` when it *is* the agent; the §5
-  single-writer rule is per-run, not per-binary). No bash/filesystem tools — that's pi's job.
-  **Graceful degradation is required:** if the model/endpoint emits no tool calls, plain assistant
-  text becomes a `send_message` — small local models must work as chat-only agents.
-- System prompt from the group's `AGENT.md`, same as pi.
+  Known limitation: intermediate tool rounds are not yet persisted across turns (PLAN 4.7).
+- **The agent writes its own replies**: tool calls execute against the session DB / workspace,
+  results feed back to the model, capped rounds prevent loops. **Graceful degradation is
+  required:** if the model emits no tool calls, plain assistant text becomes a `send_message` —
+  small local models must work as chat-only agents.
+- System prompt from the group's `AGENT.md`.
 
-### 8.6 Agent tools — a pi extension, not MCP
+The `echo` provider (returns the prompt verbatim) ships in-tree so the entire pipeline — web UI →
+router → queue → supervisor → delivery → web UI — tests without any API key. The `formatter`
+module (batch → XML prompt, timezone-aware) is the prompt renderer for any future
+prompt-consuming provider behind the same trait.
 
-pi takes custom tools as TypeScript extensions loaded at startup, so claw's tools ship as
-**`pi-extension/claw-tools.ts`** (installed in the image, passed via pi's extension mechanism).
-Each tool is a few lines: validate args → resolve destination (`destinations` table or
-`session_routing` default) → write a `messages_out` row via `node:sqlite`. The session DB path
-arrives in `CLAW_SESSION_DIR`, set by the supervisor at spawn.
+### 8.5 Agent tools & tool profiles
 
-| Tool | Effect |
-|---|---|
-| `send_message` | `messages_out` row, kind `chat` (also: how the agent replies — see below) |
-| `send_file` | move file → `outbox/<msg_id>/`, row with `files` |
-| `edit_message` / `add_reaction` | row with `Operation::Edit` / `Reaction` (seq-parity lookup) |
-| `ask_user_question` | row with `Operation::AskQuestion`, then **blocks** polling `messages_in` for the answer (timeout 300s) |
-| `schedule_task` / `list_tasks` / `cancel` / `pause` / `resume` | `system` rows (list reads `messages_in` directly) |
-| `send_to_agent` | row with `channel_type='agent'`, `platform_id=<target group>` |
-| `create_agent`, admin ops | `system` rows → host-side approval |
+All tools are Rust functions in the daemon. Tool errors (bad args, unknown tool) become result
+strings fed back to the model — a confused model can self-correct; a turn never fails on a tool.
 
-Replies are tool calls (`send_message`), and additionally the supervisor parses
-`<message to="…">` blocks out of plain turn text as a fallback — same dual path as upstream.
+| Tool | Profile | Effect |
+|---|---|---|
+| `send_message` | all | `messages_out` row, kind `chat` (the reply path) |
+| `send_file` | all | stage file → `outbox/<msg_id>/`, row with `files` |
+| `schedule_task` / task ops | all | `system` rows → host inserts/updates `messages_in` |
+| `send_to_agent` | all | row with `channel_type='agent'`, `platform_id=<target group>` |
+| `ask_user_question` | all | row with `Operation::AskQuestion`; resolution lands in M7 |
+| `bash` | coder | run a command, cwd = group workspace, timeout + output truncation |
+| `read` / `write` / `edit` | coder | workspace files; `edit` = exact-string replace |
 
-### 8.7 LLM provider & model configuration
+The **tool profile** is a per-group column: `chat` (messaging tools only — the safe default) or
+`coder` (+ bash/files). §11's honesty still applies: profiles scope the polite interface, not a
+security boundary. `grep`/`find`/`ls` are bash one-liners, not tools.
 
-**One `endpoints` table feeds both agents.** OpenRouter *is* an OpenAI-compatible endpoint
+Future extensibility is **MCP-client** shaped, not extension-script shaped: per-group MCP servers
+plugged into the same tool dispatch (backlog, PLAN M9+).
+
+### 8.6 LLM endpoint & model configuration
+
+**One `endpoints` table.** OpenRouter *is* an OpenAI-compatible endpoint
 (`https://openrouter.ai/api/v1`), as are llama.cpp, vLLM, and Ollama — so claw needs exactly one
-endpoint concept, configured from the web UI and consumed by both the native provider and pi:
+endpoint concept, configured from the web UI:
 
 ```sql
 CREATE TABLE endpoints (
@@ -418,32 +401,24 @@ CREATE TABLE endpoints (
 );
 ```
 
-- **Native provider** → hits `base_url` directly with the Rust client (§8.5).
-- **pi** → claw **materializes `/data/pi/models.json` from this table** before spawn (the
-  nanoclaw `container.json` trick: DB is the source of truth, the file is generated). One
-  endpoint defined once in the UI serves both agents. pi's built-in providers via standard env
-  keys (`ANTHROPIC_API_KEY`, …) and subscription OAuth (`docker compose exec claw pi` + `/login`,
-  tokens persisted under `PI_CODING_AGENT_DIR=/data/pi`) keep working untouched.
-
-**Per-agent-group selection** (central DB, three nullable columns):
+**Per-agent-group selection** (central DB, nullable columns):
 
 | Column | Values | Meaning |
 |---|---|---|
-| `agent_provider` | `native` \| `pi` \| `echo` | which harness (`AgentProvider` registry) |
-| `endpoint` | FK → `endpoints.name` | where inference runs (NULL = pi's own default config) |
-| `model` | free text | model id at that endpoint (`gemma4-…`, `qwen3.6-…`, `provider/id` for pi built-ins) |
+| `agent_provider` | `native` \| `echo` | which harness (`AgentProvider` registry — seam for future external providers) |
+| `endpoint` | FK → `endpoints.name` | where inference runs |
+| `model` | free text | model id at that endpoint (`gemma4-…`, `qwen3.6-…`) |
+| `tool_profile` | `chat` \| `coder` | which tool surface the agent gets (§8.5) |
 
-Resolution: group row → `CLAW_DEFAULT_MODEL`/`CLAW_DEFAULT_ENDPOINT` env → provider default.
-Example install: main chat group = `native` + `openrouter` (or local) + a fast conversational MoE;
-coding group = `pi` + `local-llama` + a dense coder model; the chat group delegates heavy work to
-the coding group over `send_to_agent`.
+Resolution: group row → `CLAW_DEFAULT_MODEL`/`CLAW_DEFAULT_ENDPOINT` env → error (each missing
+link is a distinct, named error). Example install: main chat group = `openrouter` + a fast
+conversational MoE + `chat`; coding group = `local-llama` + a dense coder model + `coder`; the
+chat group delegates heavy work to the coding group over `send_to_agent`.
 
 **Configuration surfaces** all fall out of the command registry (§9.2): an **Endpoints** resource
 (auto-generated table + form in the web admin; `claw endpoints create …` on the CLI), the groups
-form gaining provider/endpoint/model fields (endpoint as dropdown; pi models validated against a
-cached `pi --list-models`), and in-chat self-service ("switch to gemini") via the agent's
-`system`-row CLI access, gated by `cli_scope`/approval. The only flow requiring container entry is
-subscription OAuth; API-key and endpoint users never exec in.
+form gaining endpoint/model/profile fields, and in-chat self-service ("switch to gemini") via the
+agent's `system`-row CLI access, gated by `cli_scope`/approval.
 
 ---
 
@@ -480,8 +455,8 @@ one hand-written `claw.js` (~150 lines: SSE wiring, fragment swap/append by id, 
 backoff, scroll pinning, composer niceties). Markdown is rendered **server-side** with
 `pulldown-cmark` (sanitized); the client parses nothing and holds no state beyond "which chat is
 open" — a reload always reproduces reality from the `web_messages` ledger. The fork story stays
-whole: UI changes are template/CSS edits and `cargo build`, same as every other change. Node exists
-in the image only for pi, never in the build path.
+whole: UI changes are template/CSS edits and `cargo build`, same as every other change. No Node
+anywhere — not in the build, not in the image.
 
 **Layout — one screen, three panes:**
 
@@ -574,9 +549,8 @@ Two token tiers, primitives → semantic:
 - `prefers-color-scheme` is ignored: the theme is dark Nord, period (one fewer fork-breakable
   surface; a light theme is a CSS-variable fork edit).
 
-Punted past trunk: token-streaming render (pi's `message_update` deltas could feed it, but
-complete-message delivery matches the ledger model) and mobile-first layout (responsive collapse
-only).
+Punted past trunk: token-streaming render (complete-message delivery matches the ledger model)
+and mobile-first layout (responsive collapse only).
 
 ### 9.2 Admin = the command registry, rendered
 
@@ -625,14 +599,14 @@ These port from the first draft with containers subtracted:
 
 NanoClaw's premise is OS-level isolation per agent. rust-claw trades that away deliberately:
 
-- The pi process runs as the same user, in the same container, on the same filesystem as the app.
-  It can read `central.db`, other sessions' folders, and the app binary. `cwd` and prompts scope it
-  by *convention*, not enforcement.
+- A coder-profile agent runs `bash` as the same user, in the same container, on the same
+  filesystem as the app. It can read `central.db`, other sessions' folders, and the app binary.
+  Workspace `cwd`, tool profiles, and prompts scope it by *convention*, not enforcement.
 - What the Docker boundary still buys: the agent cannot touch the host machine, its credentials
   beyond the env vars you pass in, or anything outside the container + `/data`.
 - Consequences embraced: approval gates (`create_agent`, destinations, admin commands) are
-  intent-checks on the cooperative path, not security boundaries; `cli_scope` limits the polite
-  interface, not a determined agent.
+  intent-checks on the cooperative path, not security boundaries; `cli_scope` and tool profiles
+  limit the polite interface, not a determined agent.
 - Mitigations kept cheap and real: containment-checked attachment staging, destination allowlists
   validated host-side, the approval flow for self-modifying actions, and single-user auth on the
   only network surface.
@@ -649,8 +623,8 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
   `anyhow` only in `main` and task bodies. Loop iterations are fallible-and-logged, never
   loop-fatal: one poisoned session can't stop delivery for the rest.
 - `tracing` + `tracing-subscriber`: single-line structured events, stderr + `/data/logs/claw.log`,
-  `WARN+` duplicated to `claw.error.log`. The pi child's stderr is piped into the host log with the
-  session id as a field — agent failures are never lost.
+  `WARN+` duplicated to `claw.error.log`. Tool subprocess stderr (bash) is captured into tool
+  results and logs — agent failures are never lost.
 - Config: shared values in `config.rs` (`DATA_DIR=/data`, `PORT`, `CLAW_AUTH_TOKEN`, `TIMEZONE`,
   watchdog/backoff constants). Module-specific values read where used. Everything else is code.
 
@@ -662,7 +636,7 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
 
 | Crate | Why |
 |---|---|
-| `tokio` (rt-multi-thread, process, net, sync, time, signal) | runtime, pi child, unix socket |
+| `tokio` (rt-multi-thread, process, net, sync, time, signal) | runtime, bash tool children, unix socket |
 | `axum` + `tower-http` | web UI, API, SSE, static assets |
 | `rusqlite` (bundled) | central + session DBs; sync behind `spawn_blocking` |
 | `serde`, `serde_json` | content blobs, RPC frames, API |
@@ -680,8 +654,8 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
 | `pulldown-cmark` (+ sanitizer) | server-side markdown for agent messages |
 | `rust-embed` (or `include_dir`) | UI assets (css, js, Fira Code woff2) in the binary |
 
-Dropped relative to the first draft: `rmcp` (tools are a pi extension now). The pi extension's only
-runtime dependency is Node's built-in `node:sqlite`.
+Dropped relative to earlier drafts: `rmcp` (returns if/when the MCP-client backlog item lands).
+No Node, no TypeScript, no JS package manager anywhere in the project.
 
 ---
 
@@ -689,12 +663,12 @@ runtime dependency is Node's built-in `node:sqlite`.
 
 - **Pure functions first**: engage evaluation, command gating, backoff/watchdog decisions,
   recurrence advance, seq assignment, formatter output, attachment-name safety. Table-driven `#[test]`.
-- **Session-DB contract tests**: the Rust access layer and a Node test harness for
-  `claw-tools.ts` against the same tempdir `session.db` — the two writers are different languages,
-  so the schema tests *are* the integration contract.
-- **End-to-end without keys**: spin the full daemon with the echo provider against a temp `/data`;
-  drive it through the real HTTP API (login → post message → SSE reply → schedule a task → sweep
-  fires it). This is the default `cargo test` E2E; a `#[ignore]` variant runs real pi.
+- **Session-DB contract tests**: writer/reader pairs against tempdir DB files — seq parity,
+  due-filtering, the delivered ledger. The DDL lives once in `src/session/schema.sql`.
+- **End-to-end without keys**: spin the full daemon against a temp `/data` and drive it through
+  the real HTTP API — echo provider for the pipeline, an in-process mock OpenAI server for the
+  native provider (fallback path, tool-call path, and the coding tools). `#[ignore]` variants run
+  against a real model endpoint.
 
 ---
 
@@ -706,12 +680,12 @@ runtime dependency is Node's built-in `node:sqlite`.
 | 2 | One `session.db` (WAL) instead of inbound/outbound split with DELETE-journal discipline | the split existed for cross-mount SQLite; same-kernel local FS removes the problem (§5) |
 | 3 | Global sequential run queue, drain-and-exit; no warm/idle containers | predictable load on small hardware; deletes warm-pool, idle-timeout, and concurrent-stuck logic |
 | 4 | Built-in web UI is the primary channel; Chat SDK bridge dropped | richest channel becomes the one we own; requires the `web_messages` ledger (platforms stored history for us before) |
-| 5 | pi over RPC instead of Claude Agent SDK | clean JSONL protocol, native steer/follow-up/abort, directory-based session resume, multi-provider for free |
-| 6 | Agent tools as a pi TypeScript extension instead of an MCP server | pi's native extension surface; tools remain "writes to the session DB" |
+| 5 | Home-made in-process agent loop instead of any external harness (Claude Agent SDK, pi) | by M3 the loop/client/memory existed; the remaining delta was bash + file tools — see [decision 001](docs/decisions/001-drop-pi.md) |
+| 6 | Agent tools are Rust functions in the daemon; future extensibility is MCP-client shaped | tools remain "writes to the session DB"; no extension-script language, no second runtime |
 | 7 | Single binary (`claw serve` + admin subcommands), protocol as a module | one process model no longer justifies a workspace |
-| 8 | No OneCLI / credential proxy | provider keys are container env vars; acceptable for the single-user threat model |
-| 9 | `heartbeat`/`processing_ack`/`on_wake` machinery deleted | the supervisor owns the child in-process; the races those solved cannot occur |
-| 10 | Agent child stderr piped to host logs | fixes upstream's lost-container-logs gap for free |
+| 8 | No OneCLI / credential proxy | inference keys are env vars or endpoint rows; acceptable for the single-user threat model |
+| 9 | `heartbeat`/`processing_ack`/`on_wake` machinery deleted | the supervisor owns the run in-process; the races those solved cannot occur |
+| 10 | Tool subprocess output captured into tool results + logs | fixes upstream's lost-container-logs gap for free |
 
 Everything not listed — entity model, engage/gating semantics, message kinds and XML formatting,
 scheduling-as-messages, approval routing, command registry and `cli_scope`, outbox/inbox
@@ -727,19 +701,20 @@ Each ends green (`cargo test`) and runnable.
    `session.db` access layer. Contract tests pass.
 2. **M2 — Vertical slice.** Router (minimal), RunQueue + supervisor with **echo provider**, delivery,
    minimal web UI (login, one chat, SSE). A browser message round-trips end to end. No Node needed.
-3. **M3 — Native provider + endpoints.** `endpoints` table + admin commands, the in-process
+3. **M3 — Native provider + endpoints.** `endpoints` table + resolution, the in-process
    chat-completion loop with session-DB context window and native messaging tools, graceful
-   no-tool-call degradation. First real conversation (OpenRouter or local endpoint) — no Node yet.
-4. **M4 — pi provider.** RPC spawn/translate, drain loop with `follow_up`, `claw-tools.ts` with
-   `send_message`/`send_file`, formatter, `models.json` materialization from `endpoints`, group
-   workspace + `AGENT.md`. First coding agent; native↔pi delegation via `send_to_agent`.
+   no-tool-call degradation. First real conversation (OpenRouter or local endpoint).
+4. **M4 — Coding agent.** Decision 001 cut (pi + TypeScript removed); `bash` tool (workspace cwd,
+   timeout, output truncation) + per-group tool profiles; `read`/`write`/`edit` file tools;
+   coding-group end-to-end. Chat↔coder delegation via `send_to_agent`.
 5. **M5 — Scheduling + resilience.** Sweep, `schedule_task` + recurrence, watchdog + backoff,
    crash recovery, circuit breaker.
 6. **M6 — Admin surface.** Command registry, socket server, `claw` subcommands, roles/membership,
    command gate, agent `cli_scope`.
 7. **M7 — Interactivity + approvals.** `ask_user_question` cards in the UI, pending_questions,
    approvals module, web admin page.
-8. **M8 — Packaging.** Dockerfile (multi-stage, pinned pi), compose file, `/data` bootstrap,
+8. **M8 — Packaging.** Dockerfile (multi-stage, pure Rust image), compose file, `/data` bootstrap,
    first-run token flow, upgrade path.
-9. **M9 — Extended messaging.** `create_agent`, multi-group web chats, per-thread sessions in
-   the UI.
+9. **M9 — Extended messaging + extensibility.** `create_agent`, multi-group web chats, per-thread
+   sessions in the UI. Backlog: MCP client as the tool-extensibility seam; claw-as-MCP-server as
+   an additional control surface.

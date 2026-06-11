@@ -49,7 +49,7 @@ impl SessionStore {
         session: &SessionId,
     ) -> Result<SessionDb, SessionStoreError> {
         let dir = self.session_dir(agent_group, session);
-        for sub in ["inbox", "outbox", "pi"] {
+        for sub in ["inbox", "outbox"] {
             std::fs::create_dir_all(dir.join(sub))?;
         }
         SessionDb::open_dir(dir)
@@ -121,7 +121,6 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// Shared with the pi extension's Node test harness (§14) — one source of DDL truth.
 const SESSION_SCHEMA: &str = include_str!("schema.sql");
 
 #[cfg(test)]
@@ -146,7 +145,7 @@ mod tests {
         let sess = SessionId::new("sess-1");
 
         let db = store.init(&ag, &sess).expect("first init");
-        for sub in ["inbox", "outbox", "pi"] {
+        for sub in ["inbox", "outbox"] {
             assert!(db.dir().join(sub).is_dir(), "{sub} must exist");
         }
         assert!(db.dir().join("session.db").is_file());

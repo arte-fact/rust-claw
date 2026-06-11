@@ -180,7 +180,7 @@ impl Supervisor {
         group: &agent_groups::AgentGroup,
     ) -> Result<Option<crate::providers::resolution::ResolvedInference>, RunError> {
         match provider_kind {
-            AgentProviderKind::Echo | AgentProviderKind::Pi => Ok(None),
+            AgentProviderKind::Echo => Ok(None),
             AgentProviderKind::Native => {
                 let central = self.central.clone();
                 let group = group.clone();
@@ -362,22 +362,6 @@ mod tests {
         assert_eq!(content.text.as_deref(), Some("hello\nworld"));
         assert!(replies[0].seq.is_agent_assigned());
         assert!(replies[0].in_reply_to.is_some());
-    }
-
-    #[tokio::test]
-    async fn unavailable_provider_leaves_messages_pending() {
-        let fix = fixture(AgentProviderKind::Pi);
-        write_chat(&fix, "hello");
-
-        let err = supervisor(&fix)
-            .run_session(&fix.session_id)
-            .await
-            .expect_err("pi is not built yet");
-        assert!(matches!(err, RunError::Provider(_)));
-
-        let db = session_db(&fix);
-        let now = db.now_timestamp().expect("now");
-        assert_eq!(db.pending_due(&now, 10).expect("due").len(), 1);
     }
 
     #[tokio::test]

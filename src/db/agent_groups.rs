@@ -125,14 +125,14 @@ mod tests {
                 [],
             )?;
             let mut group = create(conn, "Coder", "coder")?;
-            group.agent_provider = Some(AgentProviderKind::Pi);
+            group.agent_provider = Some(AgentProviderKind::Native);
             group.endpoint = Some(EndpointName::new("local"));
             group.model = Some("qwen3.6-dense".to_owned());
             group.cli_scope = CliScope::Global;
             assert!(update(conn, &group)?);
 
             let fetched = get(conn, &group.id)?.expect("must exist");
-            assert_eq!(fetched.agent_provider, Some(AgentProviderKind::Pi));
+            assert_eq!(fetched.agent_provider, Some(AgentProviderKind::Native));
             assert_eq!(fetched.endpoint, Some(EndpointName::new("local")));
             assert_eq!(fetched.model.as_deref(), Some("qwen3.6-dense"));
             assert_eq!(fetched.cli_scope, CliScope::Global);

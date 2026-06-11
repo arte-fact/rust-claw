@@ -68,20 +68,24 @@ folder — see CLAUDE.md §"UI verification".**
       `send_to_agent`; multi-turn tool loop; no-tool-support fallback. Tests. Milestone exit:
       real conversation against OpenRouter/local endpoint. (§8.5)
 
-## M4 — pi provider
+## M4 — Coding agent (pivot: [decision 001](docs/decisions/001-drop-pi.md))
 
-- [x] **4.1 pi RPC client.** Spawn `pi --mode rpc`, JSONL framing, command/response correlation,
-      event translation → `ProviderEvent`, abort → SIGTERM → SIGKILL ladder. Tests against a
-      stub "fake pi" script speaking the protocol. (§8.4)
-- [x] **4.2 Formatter.** XML formatting by kind (chat/task/webhook/system), quoted messages,
-      attachment paths, timezone header (jiff), routing stripped. Golden tests. (§8.2)
-- [x] **4.3 Tool extension.** `pi-extension/claw-tools.ts`: `send_message`, `send_file` (outbox
-      convention), odd-seq assignment via `node:sqlite`; Node test harness against the same
-      tempdir `session.db` as the Rust contract tests (cross-language contract). (§8.6, §14)
-- [ ] **4.4 pi integration.** Supervisor drive with `follow_up` drain, `models.json`
-      materialization from `endpoints`, `PI_CODING_AGENT_DIR`, group workspace cwd + `AGENT.md`,
-      pi stderr → host logs. Integration test with stub pi; `#[ignore]` test with real pi.
-      Milestone exit: native↔pi delegation via `send_to_agent`. (§8.4, §8.7)
+- [x] **4.1–4.3 pi RPC client, formatter, TS extension.** Built and tested, then superseded by
+      decision 001 (pi dropped). The formatter survives as the generic prompt renderer; the rest
+      lives in git history (`01f65dc`).
+- [x] **4.4 Remove pi & TypeScript.** Delete `src/providers/pi`, `pi-extension/`, the Node CI
+      job, the `Pi` enum variant, the session `pi/` subdir; sync ARCHITECTURE/PLAN/CLAUDE.md;
+      write the decision record. Repo becomes 100 % Rust.
+- [ ] **4.5 Bash tool + tool profiles.** `bash` tool for the native loop: `tokio::process`, cwd =
+      group workspace, timeout, head+tail output truncation, exit code in the result. Per-group
+      `tool_profile` column (`chat` | `coder`) gating the tool surface; migration. (§8.5)
+- [ ] **4.6 File tools.** `read` (line numbers/limits), `write` (create/overwrite), `edit`
+      (exact-string replace, unique match required) — workspace-rooted path resolution. Table
+      tests. (§8.5)
+- [ ] **4.7 Coding-group end-to-end.** Integration test: coder-profile group, mock LLM scripted
+      to call `bash` + `edit` then reply; `#[ignore]` real-model test. Decide + document the
+      cross-turn tool-memory approach (transcript currently persists chat only). Milestone exit:
+      chat↔coder delegation via `send_to_agent`. (§8.4, §8.5)
 
 ## M5 — Scheduling + resilience
 
@@ -108,8 +112,8 @@ folder — see CLAUDE.md §"UI verification".**
 ## M7 — Interactivity + approvals
 
 - [ ] **7.1 ask_user_question end-to-end.** `pending_questions`, question card template + SSE,
-      answer POST → resolution; native tool unblocks, pi extension blocking-poll variant; card
-      collapse on answer; timeout. Visual verification: snapshot the card pre/post answer. (§8.5, §9.1)
+      answer POST → resolution unblocking the native tool; card collapse on answer; timeout.
+      Visual verification: snapshot the card pre/post answer. (§8.5, §9.1)
 - [ ] **7.2 Approvals.** `Access::Approval` gating, `pick_approver` (owner for web-first),
       approval cards in the UI slot, allow/deny → action execution + `system` result row. Tests. (§10)
 - [ ] **7.3 Web admin.** Registry-driven tables + forms (groups incl. provider/endpoint/model
@@ -118,16 +122,20 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M8 — Packaging
 
-- [ ] **8.1 Image + compose.** Multi-stage Dockerfile (rust builder → slim + Node + pinned pi),
-      compose file with `/data` volume + env, first-run token generation/printout, `/data`
-      bootstrap. Container smoke script. (§2)
+- [ ] **8.1 Image + compose.** Multi-stage Dockerfile (rust builder → debian-slim + binary +
+      CA certs; no Node), compose file with `/data` volume + env, first-run token
+      generation/printout, `/data` bootstrap. Container smoke script. (§2)
 - [ ] **8.2 Ops polish.** Migrations-on-boot upgrade path, engage modes in router (pattern/
       mention/mention-sticky — moved here from M2's always-engage), README quickstart, backup notes.
 
-## M9 — Extended messaging
+## M9 — Extended messaging + extensibility
 
 - [ ] **9.1 create_agent.** System action + approval → group row + folder scaffold + default
       wiring; agent-initiated via tools. (§8.6)
 - [ ] **9.2 Multi-chat UI.** Multiple web chats (create/archive), per-thread sessions surfaced in
       the UI, accumulate (`trigger=0`) policy support end-to-end. Visual verification: snapshot
       the chat list + thread views.
+
+Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
+the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for
+external agents; cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

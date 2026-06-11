@@ -52,10 +52,6 @@ impl Config {
         self.data_dir.join("groups")
     }
 
-    pub fn pi_dir(&self) -> PathBuf {
-        self.data_dir.join("pi")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
@@ -140,7 +136,6 @@ mod tests {
         );
         assert_eq!(config.sessions_dir(), PathBuf::from("/srv/claw/sessions"));
         assert_eq!(config.groups_dir(), PathBuf::from("/srv/claw/groups"));
-        assert_eq!(config.pi_dir(), PathBuf::from("/srv/claw/pi"));
         assert_eq!(config.logs_dir(), PathBuf::from("/srv/claw/logs"));
         assert_eq!(config.socket_path(), PathBuf::from("/srv/claw/claw.sock"));
     }

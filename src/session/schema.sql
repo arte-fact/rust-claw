@@ -1,7 +1,6 @@
--- Per-session SQLite schema. Shared contract (§14): the Rust host (include_str!)
--- and the pi tool extension's Node test harness both load this exact DDL, so the
--- two writers cannot drift. claw writes messages_in (even seq); the pi extension
--- writes messages_out (odd seq).
+-- Per-session SQLite schema, include_str!'d by src/session/mod.rs.
+-- Seq parity contract: the host router writes messages_in (EVEN seq);
+-- agent runs write messages_out (ODD seq) — see Seq in src/protocol/message.rs.
 
 CREATE TABLE IF NOT EXISTS messages_in (
   id                TEXT PRIMARY KEY,

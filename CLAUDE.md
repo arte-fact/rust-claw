@@ -1,8 +1,9 @@
 # rust-claw
 
-Personal AI assistant: one Rust daemon (`claw`) routing messages between a built-in web UI and
-agent sessions (pi coding agent or native chat-completion loop), with SQLite session DBs as the
-only IO surface. Design: [ARCHITECTURE.md](ARCHITECTURE.md). Execution: [PLAN.md](PLAN.md).
+Personal AI assistant: one Rust daemon (`claw`), 100 % Rust — a built-in web UI routing messages
+to an in-process agent loop (any OpenAI-compatible endpoint; chat and coder tool profiles), with
+SQLite session DBs as the only IO surface. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+Execution: [PLAN.md](PLAN.md). Removed-pi rationale: docs/decisions/001-drop-pi.md.
 
 ## Workflow
 
@@ -72,7 +73,7 @@ No doc-comment boilerplate that restates the signature.
 for decision logic. Extract pure functions from IO-bound code so the logic is testable without
 tokio/DB scaffolding (watchdog decisions, backoff, engage evaluation, formatters). Every bug fix
 starts with a regression test. Integration points get contract tests (see ARCHITECTURE.md §14 —
-the Rust/TypeScript session-DB writers share one schema test suite).
+the session-DB schema lives once in `src/session/schema.sql`).
 
 **Architecture first, small files.** Respect the module boundaries in ARCHITECTURE.md §4. Refactor
 *as you go*: when a file approaches ~300 lines or a function ~40, split before adding more. New
@@ -98,18 +99,13 @@ dumping ground.
 ## Project specifics
 
 - SQLite access is sync `rusqlite` behind `spawn_blocking` helpers — never block the runtime.
-- Seq parity invariant: claw writes even `seq`, the pi tool extension writes odd (§5). Don't touch
-  this without reading ARCHITECTURE.md §5.
+- Seq parity invariant: the host side writes even `seq` in `messages_in`, agent runs write odd in
+  `messages_out` (§5). Don't touch this without reading ARCHITECTURE.md §5.
 - CSS is design-token oriented: components consume semantic tokens only; literal colors/px/fonts
   exist solely in the `:root` block of `claw.css` (§9.1). Lint: grep `#`/`px` outside the tokens
   block must return nothing.
-- The web UI has no build step: Askama templates + hand-written `claw.css`/`claw.js`. Do not
-  introduce Node into the build path (Node exists only in the runtime image, for pi).
-- The pi tool extension (`pi-extension/`) is the only TypeScript. Its session-DB writer is tested
-  with Node's built-in runner — `cd pi-extension && npm test` — which loads the SAME
-  `src/session/schema.sql` the Rust host `include_str!`s, so the two writers can't drift (§14).
-  Changes there must pass that suite (also run in CI) in addition to the cargo checks. The seq
-  logic mirrors `Seq::next_agent_after`; keep both in sync.
+- The web UI has no build step: Askama templates + hand-written `claw.css`/`claw.js`. The project
+  is 100 % Rust — do not introduce Node, TypeScript, or any second runtime (decision 001).
 - Dependencies: check before adding (supply-chain), pin in `[workspace.dependencies]`-style table
   in Cargo.toml, prefer the already-chosen set (ARCHITECTURE.md §13). Adding a dependency is an
   architecture decision — justify it in the PR/commit message.

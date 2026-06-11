@@ -46,7 +46,7 @@ pub struct OutboundMessage {
 }
 
 impl SessionDb {
-    /// Agent-side write: assigns the next ODD seq. The pi tool extension mirrors this statement.
+    /// Agent-side write: assigns the next ODD seq.
     pub fn write_outbound(
         &self,
         message: &NewOutboundMessage,

@@ -1,6 +1,5 @@
 pub mod echo;
 pub mod native;
-pub mod pi;
 pub mod resolution;
 
 use std::path::PathBuf;
@@ -13,9 +12,7 @@ use crate::protocol::entities::AgentProviderKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("provider {0} is not available in this build")]
-    Unavailable(AgentProviderKind),
-    #[error("failed to start agent process: {0}")]
+    #[error("failed to start agent run: {0}")]
     Spawn(String),
 }
 
@@ -24,7 +21,7 @@ pub struct QueryInput {
     pub prompt: String,
     /// Group workspace (AGENT.md, skills, working files).
     pub cwd: PathBuf,
-    /// Session folder root (session.db, inbox/, outbox/, pi/).
+    /// Session folder root (session.db, inbox/, outbox/).
     pub session_dir: PathBuf,
     pub model: Option<String>,
     pub system_context: Option<String>,
@@ -55,6 +52,5 @@ pub fn create_provider(kind: AgentProviderKind) -> Result<Arc<dyn AgentProvider>
     match kind {
         AgentProviderKind::Echo => Ok(Arc::new(echo::EchoProvider)),
         AgentProviderKind::Native => Ok(Arc::new(native::NativeProvider)),
-        AgentProviderKind::Pi => Err(ProviderError::Unavailable(kind)),
     }
 }

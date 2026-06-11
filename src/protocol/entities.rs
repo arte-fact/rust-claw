@@ -19,7 +19,6 @@ text_enum!(CliScope {
 
 text_enum!(AgentProviderKind {
     Native => "native",
-    Pi => "pi",
     Echo => "echo",
 });
 
