@@ -15,13 +15,31 @@ struct Cli {
 enum Command {
     /// Run the claw daemon
     Serve,
+    /// Admin command sent to a running daemon, e.g. `claw groups list`
+    #[command(external_subcommand)]
+    Admin(Vec<String>),
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve => serve(),
+        Command::Admin(argv) => admin(&argv),
     }
+}
+
+fn admin(argv: &[String]) -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let socket_path = config.socket_path();
+    let outcome = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(claw::cli_client::run(&socket_path, argv));
+    if let Err(error) = outcome {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn serve() -> anyhow::Result<()> {

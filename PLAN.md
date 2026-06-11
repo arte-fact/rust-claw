@@ -102,7 +102,7 @@ folder — see CLAUDE.md §"UI verification".**
 
 - [x] **6.1 Socket server + dispatch.** Frame codec, `UnixListener` (0600, stale unlink),
       dispatch with `CallerContext`, error codes. Temp-socket tests. (§10)
-- [ ] **6.2 Command registry + CLI client.** `CommandDef` with arg display metadata (§9.2),
+- [x] **6.2 Command registry + CLI client.** `CommandDef` with arg display metadata (§9.2),
       generic CRUD generation per resource, `claw <resource> <verb>` subcommands + table output.
       Tests: registry → CLI → socket → dispatch round-trip.
 - [ ] **6.3 Agent transport + gates.** `system`-row CLI transport, `cli_scope` enforcement

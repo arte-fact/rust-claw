@@ -102,6 +102,20 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     ));
     tasks.spawn(sweep.run(cancel.clone()));
 
+    let registry = Arc::new(crate::commands::Registry::new(central.clone()));
+    let cli_server = Arc::new(crate::cli_server::CliServer::new(
+        config.socket_path(),
+        registry,
+    ));
+    {
+        let cancel = cancel.clone();
+        tasks.spawn(async move {
+            if let Err(error) = cli_server.run(cancel).await {
+                tracing::error!(%error, "cli server stopped");
+            }
+        });
+    }
+
     let state = WebState {
         auth: Arc::new(AuthState::from_configured_token(config.auth_token.clone())),
         central,

@@ -1,3 +1,8 @@
+pub mod registry;
+mod resources;
+
+pub use registry::{Access, ArgKind, ArgSpec, CommandDef, Registry};
+
 use async_trait::async_trait;
 
 use crate::protocol::frame::{RequestFrame, ResponseFrame};
