@@ -53,6 +53,49 @@ async fn mock_llm() -> String {
     format!("http://{addr}/v1")
 }
 
+/// Mock that drives the tool loop: a `send_message` tool call on the first
+/// round (no `tool` role yet), then a bare acknowledgement once the result
+/// comes back — proving the full assistant↔tool round-trip.
+async fn mock_llm_send_message_tool() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            let already_called_tool = body["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
+            let response = if already_called_tool {
+                serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "done" } }]
+                })
+            } else {
+                serde_json::json!({
+                    "choices": [{ "message": {
+                        "role": "assistant",
+                        "content": Value::Null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "send_message",
+                                "arguments": "{\"text\":\"hi from a tool call\"}"
+                            }
+                        }]
+                    }}]
+                })
+            };
+            Json(response)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{addr}/v1")
+}
+
 /// Pre-seed central.db with an endpoint + native group, then build the app on
 /// the same data dir — bootstrap sees the group and leaves it alone.
 fn seed_native_group(config: &Config, base_url: &str) {
@@ -102,8 +145,9 @@ async fn login(app: &axum::Router) -> String {
         .to_owned()
 }
 
-#[tokio::test]
-async fn browser_message_round_trips_through_the_native_provider() {
+/// Posts one user message to a fresh chat against a native group backed by
+/// `llm_base`, then polls until the agent's reply lands. Returns its body.
+async fn first_reply_body(llm_base: &str, user_text: &str) -> String {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: PathBuf::from(tmp.path()),
@@ -113,12 +157,10 @@ async fn browser_message_round_trips_through_the_native_provider() {
         default_endpoint: None,
         default_model: None,
     };
-    let llm_base = mock_llm().await;
-    seed_native_group(&config, &llm_base);
+    seed_native_group(&config, llm_base);
 
     let app = claw::app::build(&config).await.expect("build app");
     let cookie = login(&app.http).await;
-
     let request = |req: Request<Body>| {
         let app = app.http.clone();
         async move { app.oneshot(req).await.expect("response") }
@@ -142,7 +184,10 @@ async fn browser_message_round_trips_through_the_native_provider() {
         Request::post(format!("/api/chats/{chat_id}/messages"))
             .header(header::COOKIE, &cookie)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"text":"hello model"}"#))
+            .body(Body::from(format!(
+                r#"{{"text":{}}}"#,
+                json_string(user_text)
+            )))
             .expect("request"),
     )
     .await;
@@ -157,21 +202,32 @@ async fn browser_message_round_trips_through_the_native_provider() {
                 .expect("request"),
         )
         .await;
-        let messages = body_json(response).await;
-        let transcript = messages.as_array().expect("array").clone();
-        if transcript.len() >= 2 {
-            reply = Some(transcript[1].clone());
+        let transcript = body_json(response).await.as_array().expect("array").clone();
+        if let Some(out) = transcript.iter().find(|m| m["direction"] == "out") {
+            reply = Some(out["body"].as_str().expect("body").to_owned());
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let reply = reply.expect("native reply must arrive");
-    assert_eq!(reply["direction"], "out");
-    assert_eq!(
-        reply["body"],
-        "model saw 1 messages, last: [you] hello model"
-    );
-
     app.shutdown().await;
+    reply.expect("native reply must arrive")
+}
+
+fn json_string(value: &str) -> String {
+    Value::String(value.to_owned()).to_string()
+}
+
+#[tokio::test]
+async fn fallback_path_turns_plain_text_into_a_reply() {
+    let llm_base = mock_llm().await;
+    let body = first_reply_body(&llm_base, "hello model").await;
+    assert_eq!(body, "model saw 1 messages, last: [you] hello model");
+}
+
+#[tokio::test]
+async fn tool_call_path_sends_a_message_via_the_send_message_tool() {
+    let llm_base = mock_llm_send_message_tool().await;
+    let body = first_reply_body(&llm_base, "say hi").await;
+    assert_eq!(body, "hi from a tool call");
 }

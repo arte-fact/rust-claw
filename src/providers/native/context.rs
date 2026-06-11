@@ -23,7 +23,7 @@ pub fn build_messages(
         let Some(message) = to_chat_message(entry) else {
             continue;
         };
-        let cost = estimate_tokens(&message.content);
+        let cost = estimate_tokens(message.content.as_deref().unwrap_or_default());
         if cost > remaining {
             break;
         }
@@ -109,7 +109,7 @@ mod tests {
         let messages = build_messages(Some("be concise"), &transcript, 10_000);
         let shape: Vec<(Role, &str)> = messages
             .iter()
-            .map(|message| (message.role, message.content.as_str()))
+            .map(|message| (message.role, message.content.as_deref().unwrap_or_default()))
             .collect();
         assert_eq!(
             shape,
@@ -133,7 +133,7 @@ mod tests {
         let messages = build_messages(Some("sys"), &transcript, newest_cost);
         let shape: Vec<(Role, &str)> = messages
             .iter()
-            .map(|message| (message.role, message.content.as_str()))
+            .map(|message| (message.role, message.content.as_deref().unwrap_or_default()))
             .collect();
         assert_eq!(
             shape,
@@ -171,6 +171,9 @@ mod tests {
             content: "{\"prompt\":\"daily briefing\"}".to_owned(),
         };
         let messages = build_messages(None, &[task], 10_000);
-        assert_eq!(messages[0].content, "[scheduled task] daily briefing");
+        assert_eq!(
+            messages[0].content.as_deref(),
+            Some("[scheduled task] daily briefing")
+        );
     }
 }

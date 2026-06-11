@@ -63,7 +63,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **3.3 Native provider: conversation.** Context-window builder from `session.db` (token
       budget, newest-first truncation), `AGENT.md` system prompt, plain-reply loop → `send_message`
       degradation path. Mock-endpoint tests incl. window truncation goldens. (§8.5)
-- [ ] **3.4 Native provider: tools.** Tool schemas + dispatch for `send_message`,
+- [x] **3.4 Native provider: tools.** Tool schemas + dispatch for `send_message`,
       `ask_user_question` (defer blocking resolution to M7 — return placeholder), `schedule_task`,
       `send_to_agent`; multi-turn tool loop; no-tool-support fallback. Tests. Milestone exit:
       real conversation against OpenRouter/local endpoint. (§8.5)

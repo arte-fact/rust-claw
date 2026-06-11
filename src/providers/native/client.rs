@@ -11,12 +11,18 @@ text_enum!(Role {
     System => "system",
     User => "user",
     Assistant => "assistant",
+    Tool => "tool",
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
@@ -24,9 +30,87 @@ impl ChatMessage {
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
-            content: content.into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
+
+    /// The assistant turn that requested tool calls, echoed back so the model
+    /// sees its own request alongside the results.
+    #[must_use]
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: None,
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// JSON object encoded as a string, per the OpenAI tool-call wire format.
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDefinition {
+    #[serde(rename = "type")]
+    pub tool_type: &'static str,
+    pub function: FunctionDefinition,
+}
+
+impl ToolDefinition {
+    #[must_use]
+    pub fn function(
+        name: &'static str,
+        description: &'static str,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            tool_type: "function",
+            function: FunctionDefinition {
+                name,
+                description,
+                parameters,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionDefinition {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub parameters: serde_json::Value,
+}
+
+/// The assistant's reply: free text, tool-call requests, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub content: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,10 +160,15 @@ impl ChatClient {
         })
     }
 
-    pub async fn complete(&self, messages: &[ChatMessage]) -> Result<Option<String>, ClientError> {
+    pub async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<Completion, ClientError> {
         let mut request = self.http.post(&self.completions_url).json(&ChatRequest {
             model: &self.model,
             messages,
+            tools: (!tools.is_empty()).then_some(tools),
         });
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
@@ -100,7 +189,10 @@ impl ChatClient {
             .into_iter()
             .next()
             .ok_or_else(|| ClientError::Malformed("response has no choices".to_owned()))?;
-        Ok(choice.message.content)
+        Ok(Completion {
+            content: choice.message.content,
+            tool_calls: choice.message.tool_calls,
+        })
     }
 }
 
@@ -108,6 +200,8 @@ impl ChatClient {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ToolDefinition]>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +218,8 @@ struct Choice {
 struct AssistantMessage {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -209,14 +305,18 @@ mod tests {
         let base = mock_server(state.clone()).await;
         let client = client_for(base, Some("sk-test"));
 
-        let reply = client
-            .complete(&[
-                ChatMessage::new(Role::System, "be brief"),
-                ChatMessage::new(Role::User, "hello"),
-            ])
+        let completion = client
+            .complete(
+                &[
+                    ChatMessage::new(Role::System, "be brief"),
+                    ChatMessage::new(Role::User, "hello"),
+                ],
+                &[],
+            )
             .await
             .expect("complete");
-        assert_eq!(reply.as_deref(), Some("hi!"));
+        assert_eq!(completion.content.as_deref(), Some("hi!"));
+        assert!(completion.tool_calls.is_empty());
 
         let seen = state.seen.lock().expect("lock");
         let (auth, body) = &seen[0];
@@ -224,6 +324,7 @@ mod tests {
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "hello");
+        assert!(body.get("tools").is_none(), "empty tools must be omitted");
     }
 
     #[tokio::test]
@@ -232,10 +333,40 @@ mod tests {
         let base = mock_server(state.clone()).await;
         let client = client_for(base, None);
         client
-            .complete(&[ChatMessage::new(Role::User, "hi")])
+            .complete(&[ChatMessage::new(Role::User, "hi")], &[])
             .await
             .expect("complete");
         assert_eq!(state.seen.lock().expect("lock")[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_are_sent_and_tool_calls_are_parsed() {
+        let state = MockState::default();
+        let base = mock_server(state.clone()).await;
+        let client = client_for(base, None);
+        *state.respond.lock().expect("lock") = Some((
+            200,
+            r#"{"choices":[{"message":{"role":"assistant","content":null,
+              "tool_calls":[{"id":"call_1","type":"function",
+              "function":{"name":"send_message","arguments":"{\"text\":\"hi\"}"}}]}}]}"#
+                .to_owned(),
+        ));
+        let tools = vec![ToolDefinition::function(
+            "send_message",
+            "Send a chat message.",
+            serde_json::json!({"type": "object"}),
+        )];
+
+        let completion = client
+            .complete(&[ChatMessage::new(Role::User, "say hi")], &tools)
+            .await
+            .expect("complete");
+        assert_eq!(completion.content, None);
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].function.name, "send_message");
+
+        let body = &state.seen.lock().expect("lock")[0].1;
+        assert_eq!(body["tools"][0]["function"]["name"], "send_message");
     }
 
     #[tokio::test]
@@ -246,21 +377,21 @@ mod tests {
 
         *state.respond.lock().expect("lock") = Some((503, "overloaded".to_owned()));
         let err = client
-            .complete(&[ChatMessage::new(Role::User, "hi")])
+            .complete(&[ChatMessage::new(Role::User, "hi")], &[])
             .await
             .expect_err("must fail");
         assert!(err.is_retryable());
 
         *state.respond.lock().expect("lock") = Some((400, "bad request".to_owned()));
         let err = client
-            .complete(&[ChatMessage::new(Role::User, "hi")])
+            .complete(&[ChatMessage::new(Role::User, "hi")], &[])
             .await
             .expect_err("must fail");
         assert!(!err.is_retryable());
 
         *state.respond.lock().expect("lock") = Some((200, "not json".to_owned()));
         let err = client
-            .complete(&[ChatMessage::new(Role::User, "hi")])
+            .complete(&[ChatMessage::new(Role::User, "hi")], &[])
             .await
             .expect_err("must fail");
         assert!(matches!(err, ClientError::Malformed(_)));
