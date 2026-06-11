@@ -52,6 +52,7 @@ mod tests {
             session_dir: PathBuf::from("."),
             model: None,
             system_context: None,
+            inference: None,
         }
     }
 

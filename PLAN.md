@@ -60,7 +60,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **3.2 OpenAI-compatible client.** `reqwest` chat-completions client: request/response types,
       auth header, error mapping (retryable vs terminal), timeout. Tests against an in-process
       axum mock server. (§8.5)
-- [ ] **3.3 Native provider: conversation.** Context-window builder from `session.db` (token
+- [x] **3.3 Native provider: conversation.** Context-window builder from `session.db` (token
       budget, newest-first truncation), `AGENT.md` system prompt, plain-reply loop → `send_message`
       degradation path. Mock-endpoint tests incl. window truncation goldens. (§8.5)
 - [ ] **3.4 Native provider: tools.** Tool schemas + dispatch for `send_message`,

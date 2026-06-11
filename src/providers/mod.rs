@@ -22,10 +22,14 @@ pub enum ProviderError {
 #[derive(Debug, Clone)]
 pub struct QueryInput {
     pub prompt: String,
+    /// Group workspace (AGENT.md, skills, working files).
     pub cwd: PathBuf,
+    /// Session folder root (session.db, inbox/, outbox/, pi/).
     pub session_dir: PathBuf,
     pub model: Option<String>,
     pub system_context: Option<String>,
+    /// Resolved endpoint+model+key — required by the native provider.
+    pub inference: Option<resolution::ResolvedInference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +54,7 @@ pub trait AgentProvider: Send + Sync {
 pub fn create_provider(kind: AgentProviderKind) -> Result<Arc<dyn AgentProvider>, ProviderError> {
     match kind {
         AgentProviderKind::Echo => Ok(Arc::new(echo::EchoProvider)),
-        AgentProviderKind::Native | AgentProviderKind::Pi => Err(ProviderError::Unavailable(kind)),
+        AgentProviderKind::Native => Ok(Arc::new(native::NativeProvider)),
+        AgentProviderKind::Pi => Err(ProviderError::Unavailable(kind)),
     }
 }

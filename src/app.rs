@@ -80,6 +80,11 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
         central.clone(),
         store.clone(),
         queue.clone(),
+        crate::runs::supervisor::RunConfig {
+            groups_dir: config.groups_dir(),
+            default_endpoint: config.default_endpoint.clone(),
+            default_model: config.default_model.clone(),
+        },
     ));
     tasks.spawn(supervisor.run(cancel.clone()));
 

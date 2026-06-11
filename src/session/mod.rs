@@ -1,10 +1,12 @@
 mod inbound;
 mod outbound;
 mod routing;
+mod transcript;
 
 pub use inbound::{InboundMessage, NewInboundMessage};
 pub use outbound::{NewOutboundMessage, OutboundMessage};
 pub use routing::Destination;
+pub use transcript::TranscriptEntry;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -50,13 +52,7 @@ impl SessionStore {
         for sub in ["inbox", "outbox", "pi"] {
             std::fs::create_dir_all(dir.join(sub))?;
         }
-        let conn = Connection::open(dir.join("session.db"))?;
-        apply_pragmas(&conn)?;
-        conn.execute_batch(SESSION_SCHEMA)?;
-        Ok(SessionDb {
-            conn: Mutex::new(conn),
-            dir,
-        })
+        SessionDb::open_dir(dir)
     }
 
     pub fn open(
@@ -74,6 +70,17 @@ pub struct SessionDb {
 }
 
 impl SessionDb {
+    /// Opens an already-initialized session folder (e.g. from `QueryInput.session_dir`).
+    pub fn open_dir(dir: PathBuf) -> Result<Self, SessionStoreError> {
+        let conn = Connection::open(dir.join("session.db"))?;
+        apply_pragmas(&conn)?;
+        conn.execute_batch(SESSION_SCHEMA)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            dir,
+        })
+    }
+
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir

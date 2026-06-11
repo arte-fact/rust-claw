@@ -26,6 +26,8 @@ pub enum RunError {
     Provider(#[from] ProviderError),
     #[error("session {0} not found or inactive")]
     UnknownSession(SessionId),
+    #[error(transparent)]
+    Resolution(#[from] crate::providers::resolution::ResolutionError),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -33,18 +35,32 @@ pub enum RunError {
 type ProviderFactory =
     Box<dyn Fn(AgentProviderKind) -> Result<Arc<dyn AgentProvider>, ProviderError> + Send + Sync>;
 
+/// The supervisor's slice of the instance config.
+#[derive(Debug, Clone)]
+pub struct RunConfig {
+    pub groups_dir: std::path::PathBuf,
+    pub default_endpoint: Option<String>,
+    pub default_model: Option<String>,
+}
+
 pub struct Supervisor {
     central: Arc<CentralDb>,
     store: Arc<SessionStore>,
     queue: Arc<RunQueue>,
+    config: RunConfig,
     factory: ProviderFactory,
     batch_limit: i64,
 }
 
 impl Supervisor {
     #[must_use]
-    pub fn new(central: Arc<CentralDb>, store: Arc<SessionStore>, queue: Arc<RunQueue>) -> Self {
-        Self::with_factory(central, store, queue, Box::new(create_provider))
+    pub fn new(
+        central: Arc<CentralDb>,
+        store: Arc<SessionStore>,
+        queue: Arc<RunQueue>,
+        config: RunConfig,
+    ) -> Self {
+        Self::with_factory(central, store, queue, config, Box::new(create_provider))
     }
 
     #[must_use]
@@ -52,12 +68,14 @@ impl Supervisor {
         central: Arc<CentralDb>,
         store: Arc<SessionStore>,
         queue: Arc<RunQueue>,
+        config: RunConfig,
         factory: ProviderFactory,
     ) -> Self {
         Self {
             central,
             store,
             queue,
+            config,
             factory,
             batch_limit: 10,
         }
@@ -81,7 +99,17 @@ impl Supervisor {
     pub async fn run_session(&self, session_id: &SessionId) -> Result<(), RunError> {
         let (session, group) = self.load_session(session_id).await?;
         let db = self.open_session_db(&session).await?;
-        let provider = (self.factory)(group.agent_provider.unwrap_or(AgentProviderKind::Native))?;
+        let provider_kind = group.agent_provider.unwrap_or(AgentProviderKind::Native);
+        let provider = (self.factory)(provider_kind)?;
+        let inference = self
+            .resolve_inference_if_needed(provider_kind, &group)
+            .await?;
+        let workspace = self.config.groups_dir.join(&group.folder);
+        {
+            let workspace = workspace.clone();
+            blocking(move || std::fs::create_dir_all(&workspace).map_err(SessionStoreError::from))
+                .await?;
+        }
 
         loop {
             let batch = {
@@ -106,10 +134,11 @@ impl Supervisor {
 
             let run = provider.start(QueryInput {
                 prompt: draft_prompt(&batch),
-                cwd: db.dir().to_path_buf(),
-                session_dir: db.dir().join("pi"),
+                cwd: workspace.clone(),
+                session_dir: db.dir().to_path_buf(),
                 model: group.model.clone(),
                 system_context: None,
+                inference: inference.clone(),
             })?;
 
             match consume_run(run).await {
@@ -143,6 +172,35 @@ impl Supervisor {
         blocking(move || central.with(|conn| sessions::touch_last_active(conn, &session_id)))
             .await?;
         Ok(())
+    }
+
+    async fn resolve_inference_if_needed(
+        &self,
+        provider_kind: AgentProviderKind,
+        group: &agent_groups::AgentGroup,
+    ) -> Result<Option<crate::providers::resolution::ResolvedInference>, RunError> {
+        match provider_kind {
+            AgentProviderKind::Echo | AgentProviderKind::Pi => Ok(None),
+            AgentProviderKind::Native => {
+                let central = self.central.clone();
+                let group = group.clone();
+                let default_endpoint = self.config.default_endpoint.clone();
+                let default_model = self.config.default_model.clone();
+                let resolved = blocking(move || {
+                    central.with(|conn| {
+                        Ok(crate::providers::resolution::resolve_inference(
+                            conn,
+                            &group,
+                            default_endpoint.as_deref(),
+                            default_model.as_deref(),
+                            |var| std::env::var(var).ok(),
+                        ))
+                    })
+                })
+                .await??;
+                Ok(Some(resolved))
+            }
+        }
     }
 
     async fn load_session(
@@ -251,8 +309,21 @@ mod tests {
         }
     }
 
+    fn run_config(fix: &Fixture) -> RunConfig {
+        RunConfig {
+            groups_dir: fix._tmp.path().join("groups"),
+            default_endpoint: None,
+            default_model: None,
+        }
+    }
+
     fn supervisor(fix: &Fixture) -> Supervisor {
-        Supervisor::new(fix.central.clone(), fix.store.clone(), fix.queue.clone())
+        Supervisor::new(
+            fix.central.clone(),
+            fix.store.clone(),
+            fix.queue.clone(),
+            run_config(fix),
+        )
     }
 
     fn write_chat(fix: &Fixture, text: &str) {
@@ -295,14 +366,30 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_provider_leaves_messages_pending() {
+        let fix = fixture(AgentProviderKind::Pi);
+        write_chat(&fix, "hello");
+
+        let err = supervisor(&fix)
+            .run_session(&fix.session_id)
+            .await
+            .expect_err("pi is not built yet");
+        assert!(matches!(err, RunError::Provider(_)));
+
+        let db = session_db(&fix);
+        let now = db.now_timestamp().expect("now");
+        assert_eq!(db.pending_due(&now, 10).expect("due").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_without_an_endpoint_fails_resolution_and_leaves_messages_pending() {
         let fix = fixture(AgentProviderKind::Native);
         write_chat(&fix, "hello");
 
         let err = supervisor(&fix)
             .run_session(&fix.session_id)
             .await
-            .expect_err("native is not built yet");
-        assert!(matches!(err, RunError::Provider(_)));
+            .expect_err("no endpoint is configured");
+        assert!(matches!(err, RunError::Resolution(_)));
 
         let db = session_db(&fix);
         let now = db.now_timestamp().expect("now");
@@ -338,6 +425,7 @@ mod tests {
             fix.central.clone(),
             fix.store.clone(),
             fix.queue.clone(),
+            run_config(&fix),
             Box::new(|_| Ok(Arc::new(FailingProvider))),
         );
         sup.run_session(&fix.session_id).await.expect("run");
@@ -406,6 +494,7 @@ mod tests {
                 fix.central.clone(),
                 fix.store.clone(),
                 fix.queue.clone(),
+                run_config(&fix),
                 Box::new(move |_| {
                     Ok(Arc::new(GatedProvider {
                         release: release.clone(),
