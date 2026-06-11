@@ -292,6 +292,11 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .admin-section { display: flex; flex-direction: column; gap: var(--space-2); }
 .admin-section > h2 {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--color-bg);
+  padding: var(--space-2) 0;
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -310,6 +315,11 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .row--new { border-top: none; }
 .row-title {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-bg);
+  padding: var(--space-1) 0;
   font-size: var(--text-sm);
   font-weight: 700;
   color: var(--color-text-strong);
@@ -340,6 +350,12 @@ button:disabled { opacity: 0.5; cursor: default; }
   text-align: left;
   vertical-align: top;
 }
+.admin-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--color-bg);
+}
 .admin-table th {
   color: var(--color-text-muted);
   font-weight: 700;
@@ -364,24 +380,45 @@ button:disabled { opacity: 0.5; cursor: default; }
 /* ── responsive ────────────────────────────────────────────────────── */
 
 @media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; height: auto; min-height: 100%; }
+  /* fixed top bar + a content pane that fills the rest and scrolls internally */
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100%;
+  }
   .sidebar {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-right: none;
     border-bottom: var(--hair);
-    position: sticky;
-    top: 0;
-    background: var(--color-bg);
-    z-index: 1;
+    overflow: visible;
   }
-  .chat-list { flex-direction: row; flex-wrap: wrap; flex: 1 1 100%; }
-  .chat-link { border-left: none; border-bottom: 2px solid transparent; }
+  .sidebar .logo { font-size: var(--text-md); }
+  .chat-list {
+    flex: 1 1 0;
+    min-width: 0;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: var(--space-1);
+  }
+  .chat-link {
+    border-left: none;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    padding: var(--space-1) var(--space-2);
+  }
   .chat-link--active { border-left: none; border-bottom-color: var(--color-accent); }
-  .new-chat { flex: 1; }
-  .chat { height: auto; }
-  .transcript { max-height: 60vh; }
-  .admin-body { padding: var(--space-4); }
+  /* the chat strip takes row 1 (next to the logo); controls wrap below it */
+  .new-chat { flex: 1 1 100%; order: 5; }
+  .new-chat input { font-size: var(--text-sm); }
+  .archived { order: 6; }
+  .admin-back { order: 7; margin-left: auto; }
+  /* the content pane fills its grid row; only the list inside it scrolls */
+  .chat { height: 100%; min-height: 0; }
+  .transcript, .admin-body { min-height: 0; }
+  .admin-body { padding: var(--space-4); max-width: none; }
 }
