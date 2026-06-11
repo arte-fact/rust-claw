@@ -107,7 +107,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
 
     let cli_server = Arc::new(crate::cli_server::CliServer::new(
         config.socket_path(),
-        commands,
+        commands.clone(),
     ));
     {
         let cancel = cancel.clone();
@@ -123,6 +123,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
         central,
         web_channel,
         hub,
+        commands,
     };
     Ok(App {
         http: build_app(state),

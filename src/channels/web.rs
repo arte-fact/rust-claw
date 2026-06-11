@@ -80,6 +80,17 @@ impl WebChannel {
         })
     }
 
+    fn ledger_approval(
+        &self,
+        address: &Address,
+        summary: &str,
+        approval_id: &str,
+    ) -> Result<web_messages::WebMessage, ChannelError> {
+        self.ledger(address, |conn, chat| {
+            web_messages::append_approval(conn, chat, AGENT_SENDER, summary, approval_id)
+        })
+    }
+
     fn ledger(
         &self,
         address: &Address,
@@ -139,6 +150,11 @@ impl ChannelAdapter for WebChannel {
                 options,
                 ..
             }) => self.ledger_question(address, question, question_id, options)?,
+            Some(Operation::Approval {
+                approval_id,
+                summary,
+                ..
+            }) => self.ledger_approval(address, summary, approval_id)?,
             _ => self.ledger_outbound(address, delivery)?,
         };
         self.hub.publish(

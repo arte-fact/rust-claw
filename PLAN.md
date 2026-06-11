@@ -130,8 +130,16 @@ folder — see CLAUDE.md §"UI verification".**
       and re-wakes the session with the answer as a normal inbound — the run never blocks (fits the
       global sequential queue). Unanswered cards expire via the sweep TTL. Visual verification:
       `screenshots/question-card.png` (open + collapsed states). (§8.5, §9.1)
-- [ ] **7.2 Approvals.** `Access::Approval` gating, `pick_approver` (owner for web-first),
-      approval cards in the UI slot, allow/deny → action execution + `system` result row. Tests. (§10)
+- [x] **7.2 Approvals.** `Access::Approval` commands issued by an agent are held by the dispatcher
+      (after the `cli_scope` check) and returned as `ApprovalPending`; the `admin` tool surfaces them
+      as an `Operation::Approval` outbound → `pending_approvals` (migration 005) → an Allow/Deny
+      **approval card** (reuses the M7.1 card + SSE, `kind='approval'`). `POST /api/approvals/:id/answer`
+      runs the held command via `Registry::execute_approved` (no re-gate — the operator's allow is the
+      authorization) and re-wakes the session with a `system` result row; the operator (Host) stays
+      ungated. `pick_approver` = owner, web-first (card lands in the originating chat). `endpoints-delete`
+      is the first `Approval` command. Tests: gate holds vs. executes, `execute_approved`, and a full
+      scripted-LLM e2e (agent delete held → owner Allow → endpoint removed). Screenshot:
+      `screenshots/approval-card.png`. (§9.1, §10)
 - [ ] **7.3 Web admin.** Registry-driven tables + forms (groups incl. provider/endpoint/model
       dropdowns, wirings, endpoints, users/roles), bespoke Tasks page (next fire via the cron evaluator,
       pause/resume/cancel). Visual verification: snapshot each generated resource page. (§9.2)

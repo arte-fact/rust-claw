@@ -11,6 +11,7 @@ use axum::middleware;
 use axum::routing::get;
 
 use crate::channels::web::WebChannel;
+use crate::commands::Registry;
 use crate::db::CentralDb;
 use auth::AuthState;
 use sse::Hub;
@@ -21,6 +22,8 @@ pub struct WebState {
     pub central: Arc<CentralDb>,
     pub web_channel: Arc<WebChannel>,
     pub hub: Hub,
+    /// Used to execute a command once the operator approves it (M7.2).
+    pub commands: Arc<Registry>,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -37,6 +40,10 @@ pub fn build_app(state: WebState) -> Router {
         .route(
             "/api/questions/{question_id}/answer",
             axum::routing::post(api::answer_question),
+        )
+        .route(
+            "/api/approvals/{approval_id}/answer",
+            axum::routing::post(api::answer_approval),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -64,6 +71,7 @@ mod tests {
         build_app(WebState {
             auth: Arc::new(AuthState::new("secret-token".to_owned())),
             web_channel: Arc::new(WebChannel::new(central.clone(), hub.clone())),
+            commands: Arc::new(Registry::new(central.clone())),
             central,
             hub,
         })

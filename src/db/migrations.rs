@@ -29,6 +29,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "004-question-cards",
         up: question_cards,
     },
+    Migration {
+        version: 5,
+        name: "005-pending-approvals",
+        up: pending_approvals,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -216,6 +221,25 @@ fn question_cards(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// A privileged agent command held for owner approval (M7.2): the command + args
+/// to run on allow, plus the originating session and routing for the result.
+fn pending_approvals(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE pending_approvals (
+           approval_id    TEXT PRIMARY KEY,
+           session_id     TEXT NOT NULL REFERENCES sessions(id),
+           agent_group_id TEXT NOT NULL REFERENCES agent_groups(id),
+           command        TEXT NOT NULL,
+           args_json      TEXT NOT NULL,
+           platform_id    TEXT,
+           channel_type   TEXT,
+           thread_id      TEXT,
+           summary        TEXT NOT NULL,
+           created_at     TEXT NOT NULL
+         );",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +263,7 @@ mod tests {
                 (2, "002-web-messages".to_owned()),
                 (3, "003-tool-profile".to_owned()),
                 (4, "004-question-cards".to_owned()),
+                (5, "005-pending-approvals".to_owned()),
             ]
         );
     }

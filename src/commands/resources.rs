@@ -125,7 +125,8 @@ fn endpoint_commands() -> Vec<CommandDef> {
             name: "endpoints-delete",
             summary: "Delete an inference endpoint",
             resource: "endpoints",
-            access: Access::Open,
+            // Destructive: an agent must get owner approval; the operator (Host) is unaffected.
+            access: Access::Approval,
             args: &[NAME],
             handler: |args, _caller, db| {
                 let name = EndpointName::new(require_str(args, "name")?);

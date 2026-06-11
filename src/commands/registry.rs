@@ -86,7 +86,20 @@ impl Dispatcher for Registry {
         };
 
         let args = match self.gate_for_agent(def, &caller, request.args).await {
-            Ok(args) => args,
+            Ok(GateDecision::Proceed(args)) => args,
+            Ok(GateDecision::NeedsApproval(args)) => {
+                // The caller (the agent's `admin` tool) turns this into an approval
+                // card; the operator's allow later calls `execute_approved`.
+                return ResponseFrame {
+                    id,
+                    ok: false,
+                    data: Some(serde_json::json!({ "command": def.name, "args": args })),
+                    error: Some(FrameError {
+                        code: ErrorCode::ApprovalPending,
+                        message: format!("command {:?} requires owner approval", def.name),
+                    }),
+                };
+            }
             Err(error) => {
                 return ResponseFrame {
                     id,
@@ -97,33 +110,27 @@ impl Dispatcher for Registry {
             }
         };
 
-        let handler = def.handler;
-        let central = self.central.clone();
-        let result = tokio::task::spawn_blocking(move || handler(&args, &caller, &central)).await;
-        match result {
-            Ok(Ok(data)) => ResponseFrame::ok(id, data),
-            Ok(Err(error)) => ResponseFrame {
-                id,
-                ok: false,
-                data: None,
-                error: Some(error),
-            },
-            Err(join) => ResponseFrame::error(id, ErrorCode::HandlerError, join.to_string()),
-        }
+        self.run_handler(def.handler, id, args, caller).await
     }
+}
+
+/// What the agent gate decided: run now, or hold for owner approval (M7.2).
+enum GateDecision {
+    Proceed(Map<String, Value>),
+    NeedsApproval(Map<String, Value>),
 }
 
 impl Registry {
     /// Host callers pass through; agent callers are gated by their group's
-    /// `cli_scope` (and `Hidden` commands are operator-only).
+    /// `cli_scope` (`Hidden` is operator-only), and `Approval` commands are held.
     async fn gate_for_agent(
         &self,
         def: &CommandDef,
         caller: &CallerContext,
         args: Map<String, Value>,
-    ) -> Result<Map<String, Value>, FrameError> {
+    ) -> Result<GateDecision, FrameError> {
         let CallerContext::Agent { agent_group_id, .. } = caller else {
-            return Ok(args);
+            return Ok(GateDecision::Proceed(args));
         };
         if def.access == Access::Hidden {
             return Err(FrameError {
@@ -145,7 +152,52 @@ impl Registry {
         .map(|group| group.cli_scope)
         .unwrap_or(crate::protocol::entities::CliScope::Disabled);
 
-        super::gates::enforce_cli_scope(scope, def, agent_group_id, args)
+        let args = super::gates::enforce_cli_scope(scope, def, agent_group_id, args)?;
+        if def.access == Access::Approval {
+            Ok(GateDecision::NeedsApproval(args))
+        } else {
+            Ok(GateDecision::Proceed(args))
+        }
+    }
+
+    async fn run_handler(
+        &self,
+        handler: Handler,
+        id: String,
+        args: Map<String, Value>,
+        caller: CallerContext,
+    ) -> ResponseFrame {
+        let central = self.central.clone();
+        let result = tokio::task::spawn_blocking(move || handler(&args, &caller, &central)).await;
+        match result {
+            Ok(Ok(data)) => ResponseFrame::ok(id, data),
+            Ok(Err(error)) => ResponseFrame {
+                id,
+                ok: false,
+                data: None,
+                error: Some(error),
+            },
+            Err(join) => ResponseFrame::error(id, ErrorCode::HandlerError, join.to_string()),
+        }
+    }
+
+    /// Runs a command whose approval was already granted — no gate, since the
+    /// operator's allow is the authorization (M7.2). Unknown command → error.
+    pub async fn execute_approved(
+        &self,
+        id: String,
+        command: &str,
+        args: Map<String, Value>,
+        caller: CallerContext,
+    ) -> ResponseFrame {
+        let Some(def) = self.commands.get(command) else {
+            return ResponseFrame::error(
+                id,
+                ErrorCode::UnknownCommand,
+                format!("unknown command {command:?}"),
+            );
+        };
+        self.run_handler(def.handler, id, args, caller).await
     }
 }
 
@@ -274,5 +326,68 @@ mod tests {
             .dispatch(request("groups-list", &[]), CallerContext::Host)
             .await;
         assert!(response.ok, "host must not be scope-gated");
+    }
+
+    fn global_group_with_endpoint() -> (Arc<CentralDb>, Registry, AgentGroupId) {
+        use crate::db::endpoints;
+        use crate::protocol::ids::EndpointName;
+        let central = Arc::new(CentralDb::open_in_memory().expect("open"));
+        let group_id = central
+            .with(|conn| {
+                let mut group = agent_groups::create(conn, "ops", "ops")?;
+                group.cli_scope = CliScope::Global;
+                agent_groups::update(conn, &group)?;
+                endpoints::create(conn, &EndpointName::new("openrouter"), "https://x")?;
+                Ok(group.id)
+            })
+            .expect("seed");
+        let registry = Registry::new(central.clone());
+        (central, registry, group_id)
+    }
+
+    fn endpoint_exists(central: &CentralDb) -> bool {
+        use crate::db::endpoints;
+        use crate::protocol::ids::EndpointName;
+        central
+            .with(|conn| endpoints::get(conn, &EndpointName::new("openrouter")))
+            .expect("get")
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn agent_approval_command_is_held_not_executed() {
+        let (central, registry, group_id) = global_group_with_endpoint();
+        let response = registry
+            .dispatch(
+                request("endpoints-delete", &[("name", "openrouter")]),
+                agent_caller(&group_id),
+            )
+            .await;
+        assert_eq!(
+            response.error.as_ref().expect("held").code,
+            ErrorCode::ApprovalPending
+        );
+        assert_eq!(
+            response.data.expect("payload")["command"],
+            "endpoints-delete"
+        );
+        assert!(endpoint_exists(&central), "must not run before approval");
+    }
+
+    #[tokio::test]
+    async fn execute_approved_runs_the_handler_without_gating() {
+        let (central, registry, group_id) = global_group_with_endpoint();
+        let mut args = Map::new();
+        args.insert("name".to_owned(), Value::String("openrouter".to_owned()));
+        let response = registry
+            .execute_approved(
+                "id-1".to_owned(),
+                "endpoints-delete",
+                args,
+                agent_caller(&group_id),
+            )
+            .await;
+        assert!(response.ok, "{:?}", response.error);
+        assert!(!endpoint_exists(&central), "the approved delete must run");
     }
 }

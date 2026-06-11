@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use claw::config::Config;
 use claw::db::{CentralDb, agent_groups, endpoints};
-use claw::protocol::entities::{AgentProviderKind, ToolProfile};
+use claw::protocol::entities::{AgentProviderKind, CliScope, ToolProfile};
 use claw::protocol::ids::EndpointName;
 
 const TOKEN: &str = "e2e-token";
@@ -703,4 +703,167 @@ async fn agent_runs_an_admin_command_through_the_dispatcher() {
         Some("swapped-by-agent"),
         "the admin command must have changed the group model through the full chain"
     );
+}
+
+/// Mock for the approval lifecycle: call the `admin` tool to delete an endpoint
+/// (round 1), acknowledge once it is "submitted for approval" (round 2), then
+/// confirm once the `[system …]` result of the approved command comes back.
+async fn mock_llm_approval() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            let messages = body["messages"].as_array().cloned().unwrap_or_default();
+            let saw_system = messages.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("[system"))
+            });
+            let called_tool = messages.iter().any(|m| m["role"] == "tool");
+            let response = if saw_system {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "the endpoint is gone"
+                }}]})
+            } else if called_tool {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "awaiting your approval"
+                }}]})
+            } else {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": Value::Null,
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {
+                        "name": "admin",
+                        "arguments": "{\"command\":\"endpoints-delete\",\"args\":{\"name\":\"victim\"}}"
+                    }}]
+                }}]})
+            };
+            Json(response)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{addr}/v1")
+}
+
+/// Full M7.2 chain: a global-`cli_scope` agent asks to delete an endpoint, the
+/// destructive command is held (not run), an approval card appears, and only the
+/// owner's Allow actually deletes the endpoint.
+#[tokio::test]
+async fn agent_destructive_command_waits_for_owner_approval() {
+    let llm_base = mock_llm_approval().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: PathBuf::from(tmp.path()),
+        port: 0,
+        auth_token: Some(TOKEN.to_owned()),
+        timezone: "UTC".to_owned(),
+        default_endpoint: None,
+        default_model: None,
+    };
+    seed_native_group(&config, &llm_base);
+    // Give the group global scope (endpoints aren't group-scoped) and a victim.
+    {
+        let central = CentralDb::open(&config.central_db_path()).expect("central");
+        central
+            .with(|conn| {
+                let mut group = agent_groups::list(conn)?.remove(0);
+                group.cli_scope = CliScope::Global;
+                agent_groups::update(conn, &group)?;
+                endpoints::create(conn, &EndpointName::new("victim"), "https://victim")?;
+                Ok(())
+            })
+            .expect("patch");
+    }
+
+    let app = claw::app::build(&config).await.expect("build app");
+    let cookie = login(&app.http).await;
+    let request = |req: Request<Body>| {
+        let app = app.http.clone();
+        async move { app.oneshot(req).await.expect("response") }
+    };
+
+    let chat_id = body_json(
+        request(
+            Request::post("/api/chats")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Main"}"#))
+                .expect("request"),
+        )
+        .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("platform_id")
+        .to_owned();
+
+    request(
+        Request::post(format!("/api/chats/{chat_id}/messages"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"delete the victim endpoint"}"#))
+            .expect("request"),
+    )
+    .await;
+
+    // Wait for the approval card; read its approval id from the card row.
+    let mut approval_id = None;
+    for _ in 0..100 {
+        let messages = body_json(
+            request(
+                Request::get(format!("/api/chats/{chat_id}/messages"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await,
+        )
+        .await;
+        if let Some(card) = messages
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|m| m["kind"] == "approval")
+        {
+            approval_id = Some(card["question_id"].as_str().expect("id").to_owned());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let approval_id = approval_id.expect("an approval card must appear");
+
+    // Still held: the endpoint is not deleted before approval.
+    {
+        let central = CentralDb::open(&config.central_db_path()).expect("central");
+        let exists = central
+            .with(|conn| endpoints::get(conn, &EndpointName::new("victim")))
+            .expect("get")
+            .is_some();
+        assert!(exists, "the endpoint must survive until approved");
+    }
+
+    // The owner allows it.
+    let allowed = request(
+        Request::post(format!("/api/approvals/{approval_id}/answer"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"decision":"Allow"}"#))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    app.shutdown().await;
+
+    let central = CentralDb::open(&config.central_db_path()).expect("central");
+    let gone = central
+        .with(|conn| endpoints::get(conn, &EndpointName::new("victim")))
+        .expect("get")
+        .is_none();
+    assert!(gone, "the approved delete must have run");
 }

@@ -11,6 +11,7 @@ text_enum!(Direction {
 text_enum!(MessageRowKind {
     Chat => "chat",
     Question => "question",
+    Approval => "approval",
 });
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -65,6 +66,28 @@ pub fn append_question(
            (messaging_group_id, direction, sender, body, created_at, kind, question_id, options_json)
          VALUES (?1, 'out', ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'question', ?4, ?5)",
         params![messaging_group_id, sender, question, question_id, options_json],
+    )?;
+    fetch(conn, conn.last_insert_rowid())
+}
+
+/// Appends an open approval card. It reuses the question columns (`question_id`
+/// holds the approval id, `options` are Allow/Deny) so it renders and collapses
+/// through the same path; the buttons target the approvals endpoint (§9, M7.2).
+pub fn append_approval(
+    conn: &Connection,
+    messaging_group_id: &MessagingGroupId,
+    sender: &str,
+    summary: &str,
+    approval_id: &str,
+) -> Result<WebMessage, rusqlite::Error> {
+    let options = ["Allow".to_owned(), "Deny".to_owned()];
+    let options_json = serde_json::to_string(&options)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+    conn.execute(
+        "INSERT INTO web_messages
+           (messaging_group_id, direction, sender, body, created_at, kind, question_id, options_json)
+         VALUES (?1, 'out', ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'approval', ?4, ?5)",
+        params![messaging_group_id, sender, summary, approval_id, options_json],
     )?;
     fetch(conn, conn.last_insert_rowid())
 }

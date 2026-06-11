@@ -450,6 +450,15 @@ behind the middleware. The web user is `web:owner` in the entity model and is au
   `message_update`), and submits the choice as a normal inbound so the asking session re-wakes.
   Unanswered cards collapse to "no answer" once the sweep passes their TTL. Edits and reactions
   mutate the ledger row and push an SSE update.
+- **Approvals** (M7.2) reuse the same machinery. A command marked `Access::Approval` (e.g.
+  `endpoints-delete`) issued by an agent is held by the dispatcher (after the `cli_scope` check) and
+  returned as `ApprovalPending`; the `admin` tool turns that into an `Operation::Approval` outbound,
+  which delivery records in `pending_approvals` and the channel renders as an **approval card**
+  (`kind='approval'`, Allow/Deny). `POST /api/approvals/:id/answer` runs the held command via
+  `Registry::execute_approved` (no re-gate — the operator's allow *is* the authorization), then
+  re-wakes the asking session with a `system` result row. The operator (Host) is never gated, so
+  the same command stays immediate on the CLI. `pick_approver` is the owner, web-first: the card
+  lands in the chat the agent was working in.
 - Typing/progress: `Progress` events from the running session surface as a live "working…" status
   line — strictly better than typing indicators.
 

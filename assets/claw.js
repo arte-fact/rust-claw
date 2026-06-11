@@ -64,13 +64,17 @@
     transcript.addEventListener('click', async (event) => {
       const button = event.target.closest('.qcard-option');
       if (!button) return;
-      const { question, option } = button.dataset;
-      const card = button.closest('.msg--question');
+      const { question, approval, option } = button.dataset;
+      const card = button.closest('.msg');
       if (card) card.classList.add('qcard--pending');
-      const response = await fetch(`/api/questions/${question}/answer`, {
+      const url = approval
+        ? `/api/approvals/${approval}/answer`
+        : `/api/questions/${question}/answer`;
+      const body = approval ? { decision: option } : { option };
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ option }),
+        body: JSON.stringify(body),
       });
       if (!response.ok && card) card.classList.remove('qcard--pending');
     });

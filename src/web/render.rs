@@ -17,6 +17,9 @@ struct MessageItem {
 #[template(path = "question.html")]
 struct QuestionCard {
     id: i64,
+    /// Which endpoint the buttons answer: "question" or "approval" (drives the
+    /// `data-…` attribute the client posts on).
+    target: &'static str,
     question_id: String,
     sender: String,
     time: String,
@@ -30,7 +33,8 @@ struct QuestionCard {
 #[must_use]
 pub fn message_html(message: &WebMessage) -> String {
     match message.kind {
-        MessageRowKind::Question => question_html(message),
+        MessageRowKind::Question => card_html(message, "question"),
+        MessageRowKind::Approval => card_html(message, "approval"),
         MessageRowKind::Chat => chat_html(message),
     }
 }
@@ -53,9 +57,10 @@ fn chat_html(message: &WebMessage) -> String {
     })
 }
 
-fn question_html(message: &WebMessage) -> String {
+fn card_html(message: &WebMessage, target: &'static str) -> String {
     let card = QuestionCard {
         id: message.id,
+        target,
         question_id: message.question_id.clone().unwrap_or_default(),
         sender: message.sender.clone(),
         time: clock_time(&message.created_at),
@@ -64,7 +69,7 @@ fn question_html(message: &WebMessage) -> String {
         answer: message.answer.clone(),
     };
     card.render().unwrap_or_else(|error| {
-        tracing::error!(%error, "question template render failed");
+        tracing::error!(%error, "card template render failed");
         String::new()
     })
 }

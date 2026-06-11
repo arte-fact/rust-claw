@@ -8,9 +8,9 @@
     {% if let Some(chosen) = answer %}
     <p class="qcard-answer"><span class="qcard-check">✓</span>{{ chosen }}</p>
     {% else %}
-    <div class="qcard-options" data-question="{{ question_id }}">
+    <div class="qcard-options">
       {% for option in options %}
-      <button type="button" class="qcard-option" data-question="{{ question_id }}"
+      <button type="button" class="qcard-option" data-{{ target }}="{{ question_id }}"
               data-option="{{ option }}">{{ option }}</button>
       {% endfor %}
     </div>

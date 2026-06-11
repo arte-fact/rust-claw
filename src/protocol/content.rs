@@ -140,6 +140,13 @@ pub enum Operation {
         question: String,
         options: Vec<String>,
     },
+    /// A privileged command an agent wants to run, held for owner approval (M7.2).
+    Approval {
+        approval_id: String,
+        command: String,
+        args: serde_json::Map<String, Value>,
+        summary: String,
+    },
     Edit {
         message_id: Seq,
         text: String,

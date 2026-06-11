@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::channels::{AdapterRegistry, Address, OutboundDelivery, OutboundFile};
-use crate::db::{CentralDb, DbError, questions, sessions};
+use crate::db::{CentralDb, DbError, approvals, questions, sessions};
 use crate::protocol::content::{Operation, OutboundContent, Routing};
 use crate::protocol::ids::{MessageOutId, SessionId};
 use crate::session::{OutboundMessage, SessionDb, SessionStore, SessionStoreError};
@@ -88,18 +88,18 @@ impl Delivery {
             .await?
         };
         for message in due {
-            self.deliver_one(&session.id, &db, &message).await?;
+            self.deliver_one(session, &db, &message).await?;
         }
         Ok(())
     }
 
     async fn deliver_one(
         &self,
-        session_id: &SessionId,
+        session: &sessions::Session,
         db: &Arc<SessionDb>,
         message: &OutboundMessage,
     ) -> Result<(), DeliveryError> {
-        match self.try_deliver(session_id, db, message).await {
+        match self.try_deliver(session, db, message).await {
             Ok(platform_message_id) => {
                 let db = db.clone();
                 let id = message.id.clone();
@@ -145,7 +145,7 @@ impl Delivery {
     /// One delivery attempt; every failure mode is a string reason for the retry counter.
     async fn try_deliver(
         &self,
-        session_id: &SessionId,
+        session: &sessions::Session,
         db: &Arc<SessionDb>,
         message: &OutboundMessage,
     ) -> Result<Option<String>, String> {
@@ -159,29 +159,40 @@ impl Delivery {
             .ok_or_else(|| {
             "no destination: message and session routing are both empty".to_owned()
         })?;
+        let routing = Routing {
+            channel_type: Some(channel_type.clone()),
+            platform_id: Some(address.platform_id.clone()),
+            thread_id: address.thread_id.clone(),
+        };
 
         let content = OutboundContent::parse(&message.content).map_err(|err| err.to_string())?;
-        if let Some(Operation::AskQuestion {
-            question_id,
-            title,
-            options,
-            ..
-        }) = &content.operation
-        {
-            let routing = Routing {
-                channel_type: Some(channel_type.clone()),
-                platform_id: Some(address.platform_id.clone()),
-                thread_id: address.thread_id.clone(),
-            };
-            self.register_question(
-                session_id,
-                &message.id,
-                &routing,
+        match &content.operation {
+            Some(Operation::AskQuestion {
                 question_id,
                 title,
                 options,
-            )
-            .await?;
+                ..
+            }) => {
+                self.register_question(
+                    &session.id,
+                    &message.id,
+                    &routing,
+                    question_id,
+                    title,
+                    options,
+                )
+                .await?;
+            }
+            Some(Operation::Approval {
+                approval_id,
+                command,
+                args,
+                summary,
+            }) => {
+                self.register_approval(session, &routing, approval_id, command, args, summary)
+                    .await?;
+            }
+            _ => {}
         }
 
         let files = collect_outbox_files(db, message);
@@ -231,6 +242,45 @@ impl Delivery {
                     &routing,
                     &title,
                     &options,
+                )
+            })
+        })
+        .await
+        .map_err(|err| err.to_string())
+    }
+
+    /// Records a held command so the operator's allow can run it and report back
+    /// to this session. Idempotent across retries (the `approval_id` PK dedupes).
+    async fn register_approval(
+        &self,
+        session: &sessions::Session,
+        routing: &Routing,
+        approval_id: &str,
+        command: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+        summary: &str,
+    ) -> Result<(), String> {
+        let central = self.central.clone();
+        let routing = routing.clone();
+        let session_id = session.id.clone();
+        let agent_group_id = session.agent_group_id.clone();
+        let approval_id = approval_id.to_owned();
+        let command = command.to_owned();
+        let args = args.clone();
+        let summary = summary.to_owned();
+        blocking(move || {
+            central.with(|conn| {
+                approvals::insert(
+                    conn,
+                    &approvals::NewApproval {
+                        approval_id: &approval_id,
+                        session_id: &session_id,
+                        agent_group_id: &agent_group_id,
+                        command: &command,
+                        args: &args,
+                        routing: &routing,
+                        summary: &summary,
+                    },
                 )
             })
         })

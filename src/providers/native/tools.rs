@@ -248,7 +248,7 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
     }
     match name {
         ADMIN => match &context.admin {
-            Some(admin) => run_admin(admin, &call.function.arguments).await,
+            Some(admin) => run_admin(db, admin, &call.function.arguments).await,
             None => {
                 ToolOutcome::note("error: admin commands are not available to this agent group")
             }
@@ -332,8 +332,9 @@ struct AdminArgs {
 }
 
 /// Runs an admin command through the dispatcher as this agent — the same path the
-/// operator CLI uses, so M6.3's `cli_scope`/`Hidden` gates apply uniformly.
-async fn run_admin(admin: &AgentAdmin, arguments: &str) -> ToolOutcome {
+/// operator CLI uses, so M6.3's `cli_scope`/`Hidden` gates apply uniformly. An
+/// `Approval` command comes back held; we surface it as an approval card (M7.2).
+async fn run_admin(db: &SessionDb, admin: &AgentAdmin, arguments: &str) -> ToolOutcome {
     let parsed: AdminArgs = match serde_json::from_str(arguments) {
         Ok(parsed) => parsed,
         Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
@@ -347,7 +348,68 @@ async fn run_admin(admin: &AgentAdmin, arguments: &str) -> ToolOutcome {
         .dispatcher
         .dispatch(request, admin.caller.clone())
         .await;
+    if response.error.as_ref().map(|error| error.code)
+        == Some(crate::protocol::frame::ErrorCode::ApprovalPending)
+    {
+        return submit_for_approval(db, &response);
+    }
     ToolOutcome::note(render_admin_response(&response))
+}
+
+/// Turns a held `Approval` response into an `Operation::Approval` outbound, which
+/// delivery registers and the channel renders as an allow/deny card.
+fn submit_for_approval(
+    db: &SessionDb,
+    response: &crate::protocol::frame::ResponseFrame,
+) -> ToolOutcome {
+    let data = response.data.as_ref();
+    let command = data
+        .and_then(|value| value.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let args = data
+        .and_then(|value| value.get("args"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let approval_id = crate::db::generate_id("ap");
+    let summary = format!("run `{command}`{}", summarize_args(&args));
+    let content = OutboundContent {
+        text: Some(format!("Requested owner approval to {summary}.")),
+        files: Vec::new(),
+        operation: Some(Operation::Approval {
+            approval_id: approval_id.clone(),
+            command,
+            args,
+            summary,
+        }),
+        extra: Map::new(),
+    };
+    let body = match serde_json::to_string(&content) {
+        Ok(body) => body,
+        Err(err) => return ToolOutcome::note(format!("error: {err}")),
+    };
+    match db.write_outbound(&NewOutboundMessage::chat(body, Routing::default())) {
+        Ok(_) => ToolOutcome::message(format!(
+            "submitted for owner approval ({approval_id}); the outcome will arrive as a message"
+        )),
+        Err(err) => ToolOutcome::note(format!("error: {err}")),
+    }
+}
+
+fn summarize_args(args: &Map<String, Value>) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = args
+        .iter()
+        .map(|(key, value)| match value.as_str() {
+            Some(text) => format!("{key}={text}"),
+            None => format!("{key}={value}"),
+        })
+        .collect();
+    format!(" ({})", parts.join(", "))
 }
 
 fn render_admin_response(response: &crate::protocol::frame::ResponseFrame) -> String {

@@ -4,8 +4,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{DbError, agent_groups, messaging_groups, questions, web_messages};
-use crate::protocol::content::ChatContent;
+use crate::commands::CallerContext;
+use crate::db::{DbError, agent_groups, approvals, messaging_groups, questions, web_messages};
+use crate::protocol::content::{ChatContent, SystemResult};
 use crate::protocol::ids::UserId;
 use crate::protocol::message::MessageKind;
 use crate::router::InboundEvent;
@@ -259,6 +260,103 @@ pub async fn answer_question(
         thread_id: routing.thread_id,
         kind: MessageKind::Chat,
         content: serde_json::to_string(&content)
+            .map_err(|err| ApiError::Channel(err.to_string()))?,
+        is_mention: false,
+        is_group: false,
+    };
+    state
+        .web_channel
+        .submit(event)
+        .await
+        .map_err(|err| ApiError::Channel(err.to_string()))?;
+    Ok(Json(card))
+}
+
+#[derive(Deserialize)]
+pub struct AnswerApproval {
+    pub decision: String,
+}
+
+/// Resolves a held approval: on Allow, runs the command (bypassing the approval
+/// gate, since the operator authorized it); either way collapses the card and
+/// re-wakes the agent's session with a `system` result.
+pub async fn answer_approval(
+    State(state): State<WebState>,
+    Path(approval_id): Path<String>,
+    Json(body): Json<AnswerApproval>,
+) -> Result<Json<web_messages::WebMessage>, ApiError> {
+    let allow = match body.decision.as_str() {
+        "Allow" => true,
+        "Deny" => false,
+        other => return Err(ApiError::NotAnOption(other.to_owned())),
+    };
+
+    let central = state.central.clone();
+    let aid = approval_id.clone();
+    let approval = blocking(move || central.with(|conn| approvals::take(conn, &aid)))
+        .await?
+        .ok_or(ApiError::QuestionClosed)?;
+
+    let (status, result) = if allow {
+        let caller = CallerContext::Agent {
+            session_id: approval.session_id.clone(),
+            agent_group_id: approval.agent_group_id.clone(),
+            messaging_group_id: None,
+        };
+        let response = state
+            .commands
+            .execute_approved(
+                crate::db::generate_id("acmd"),
+                &approval.command,
+                approval.args.clone(),
+                caller,
+            )
+            .await;
+        if response.ok {
+            ("ok", response.data.unwrap_or(serde_json::Value::Null))
+        } else {
+            let message = response
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| "command failed".to_owned());
+            ("error", serde_json::Value::String(message))
+        }
+    } else {
+        (
+            "denied",
+            serde_json::Value::String("declined by owner".to_owned()),
+        )
+    };
+
+    let label = if allow { "Allowed" } else { "Denied" };
+    let central = state.central.clone();
+    let aid = approval_id.clone();
+    let card =
+        blocking(move || central.with(|conn| web_messages::resolve_question(conn, &aid, label)))
+            .await?
+            .ok_or(ApiError::QuestionClosed)?;
+
+    state.hub.publish(
+        "message_update",
+        super::render::message_update_payload(&card),
+    );
+
+    let platform_id = approval
+        .routing
+        .platform_id
+        .clone()
+        .ok_or(ApiError::QuestionClosed)?;
+    let system = SystemResult {
+        action: approval.command,
+        status: status.to_owned(),
+        result,
+    };
+    let event = InboundEvent {
+        channel_type: crate::channels::web::CHANNEL_TYPE.to_owned(),
+        platform_id,
+        thread_id: approval.routing.thread_id,
+        kind: MessageKind::System,
+        content: serde_json::to_string(&system)
             .map_err(|err| ApiError::Channel(err.to_string()))?,
         is_mention: false,
         is_group: false,
