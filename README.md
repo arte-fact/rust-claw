@@ -60,13 +60,15 @@ second runtime. It's 100 % Rust in one container.
 You need **Docker** with the Compose plugin. From the project folder:
 
 ```bash
+cp .env.example .env      # your config — edit if you like
 docker compose up --build -d
 ```
 
-That builds the image and starts claw. Then open **<http://localhost:8080>**.
+That builds the image and starts claw. Then open **<http://localhost:8080>**
+(or whatever `CLAW_PORT` you set).
 
-> The bundled `compose.yaml` sets a login token and uses host networking. If you
-> change `CLAW_PORT`, open that port instead.
+> All configuration lives in **`.env`** (gitignored). Compose reads it
+> automatically; `.env.example` documents every variable.
 
 To stop it: `docker compose down` (your data survives in the volume).
 
@@ -74,7 +76,7 @@ To stop it: `docker compose down` (your data survives in the volume).
 
 claw is protected by a single login token.
 
-- If you set `CLAW_AUTH_TOKEN` in `compose.yaml` (the bundled file does), log in
+- If you set `CLAW_AUTH_TOKEN` in `.env`, log in
   with that value.
 - If you leave it unset, claw **generates one on first start and prints it to the
   logs**, then saves it so it stays the same across restarts:
@@ -171,8 +173,9 @@ Two kinds of interactive cards can appear in a chat:
 
 ## The admin panel
 
-Click **⚙ admin** (sidebar) for a self-rendering control panel. Each section is a
-table of what exists plus forms to change it:
+Click **⚙ admin** (sidebar) for a self-rendering control panel. Each section is an
+**editable list** — every item is a row you can change inline (with **save** and
+**delete**), plus an **add** row to create new ones:
 
 - **endpoints** — your model endpoints (add / edit / delete).
 - **groups** — your agents and their provider / endpoint / model / tool-profile /
@@ -185,7 +188,7 @@ Anything you can do here, you can also do from the [command line](#command-line-
 
 ## Configuration reference
 
-Set these in `compose.yaml` under `environment:` (or as plain env vars).
+Set these in `.env` (Compose reads it automatically).
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -257,12 +260,12 @@ working.
   [Make it smart](#make-it-smart-connect-a-model). (The default provider is
   `echo`.)
 - **I lost the login token.** `docker compose logs claw | grep token`, or set
-  `CLAW_AUTH_TOKEN` in `compose.yaml` and restart.
+  `CLAW_AUTH_TOKEN` in `.env` and restart.
 - **Replies error out.** Check the endpoint base URL, model name, and key in
   **admin → endpoints / groups**, then `docker compose logs -f claw`.
 - **A request needs my approval and I missed it.** It's an Allow/Deny card in the
   chat where it was requested; scroll up to it.
-- **Port already in use.** Change `CLAW_PORT` in `compose.yaml`.
+- **Port already in use.** Change `CLAW_PORT` in `.env`.
 
 ## Command-line admin
 

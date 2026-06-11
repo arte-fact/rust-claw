@@ -12,3 +12,5 @@ justfile
 Dockerfile
 compose.yaml
 scripts/
+.env
+.env.example
