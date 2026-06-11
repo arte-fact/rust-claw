@@ -105,6 +105,11 @@ dumping ground.
   block must return nothing.
 - The web UI has no build step: Askama templates + hand-written `claw.css`/`claw.js`. Do not
   introduce Node into the build path (Node exists only in the runtime image, for pi).
+- The pi tool extension (`pi-extension/`) is the only TypeScript. Its session-DB writer is tested
+  with Node's built-in runner — `cd pi-extension && npm test` — which loads the SAME
+  `src/session/schema.sql` the Rust host `include_str!`s, so the two writers can't drift (§14).
+  Changes there must pass that suite (also run in CI) in addition to the cargo checks. The seq
+  logic mirrors `Seq::next_agent_after`; keep both in sync.
 - Dependencies: check before adding (supply-chain), pin in `[workspace.dependencies]`-style table
   in Cargo.toml, prefer the already-chosen set (ARCHITECTURE.md §13). Adding a dependency is an
   architecture decision — justify it in the PR/commit message.

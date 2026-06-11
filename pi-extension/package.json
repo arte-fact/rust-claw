@@ -1,0 +1,10 @@
+{
+  "name": "claw-pi-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "claw tools for the pi coding agent — writes messages_out rows the host delivers",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  }
+}

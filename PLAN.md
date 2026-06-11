@@ -75,7 +75,7 @@ folder — see CLAUDE.md §"UI verification".**
       stub "fake pi" script speaking the protocol. (§8.4)
 - [x] **4.2 Formatter.** XML formatting by kind (chat/task/webhook/system), quoted messages,
       attachment paths, timezone header (jiff), routing stripped. Golden tests. (§8.2)
-- [ ] **4.3 Tool extension.** `pi-extension/claw-tools.ts`: `send_message`, `send_file` (outbox
+- [x] **4.3 Tool extension.** `pi-extension/claw-tools.ts`: `send_message`, `send_file` (outbox
       convention), odd-seq assignment via `node:sqlite`; Node test harness against the same
       tempdir `session.db` as the Rust contract tests (cross-language contract). (§8.6, §14)
 - [ ] **4.4 pi integration.** Supervisor drive with `follow_up` drain, `models.json`
