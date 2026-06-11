@@ -89,6 +89,30 @@ impl Client {
             .await
             .expect("response")
     }
+
+    async fn post_form(&self, path: &str, body: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header(header::COOKIE, &self.cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body.to_owned()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+}
+
+async fn body_text(response: axum::response::Response) -> String {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("utf8 body")
 }
 
 #[tokio::test]
@@ -138,6 +162,51 @@ async fn browser_message_round_trips_through_the_echo_agent() {
     assert_eq!(transcript[1]["direction"], "out");
     assert_eq!(transcript[1]["sender"], "assistant");
     assert_eq!(transcript[1]["body"], "hello agent");
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_renders_resources_and_runs_commands_as_host() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(tmp.path().to_path_buf());
+    let app = claw::app::build(&config).await.expect("build app");
+    let client = Client::login(app.http.clone()).await;
+
+    // The endpoints page lists the (empty) table and a registry-driven create form.
+    let page = body_text(client.get("/admin/endpoints").await).await;
+    assert!(page.contains("endpoints-create"), "create form must render");
+    assert!(
+        page.contains("/admin/run"),
+        "forms post to the run endpoint"
+    );
+
+    // Creating an endpoint through the generic run endpoint works (as Host).
+    let created = client
+        .post_form(
+            "/admin/run",
+            "command=endpoints-create&name=openrouter&base_url=https://openrouter.ai/api/v1",
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+
+    let page = body_text(client.get("/admin/endpoints").await).await;
+    assert!(page.contains("openrouter"), "the new endpoint must appear");
+
+    // The groups page renders Enum fields (cli_scope) as a select.
+    let groups = body_text(client.get("/admin/groups").await).await;
+    assert!(groups.contains("groups-update"));
+    assert!(groups.contains("<select name=\"cli_scope\""));
+
+    // Hidden commands are operator-only, not agent-only: the admin shows roles-grant.
+    let roles = body_text(client.get("/admin/roles").await).await;
+    assert!(roles.contains("roles-grant"));
+
+    // An unknown resource redirects to the default page.
+    assert_eq!(
+        client.get("/admin/nope").await.status(),
+        StatusCode::SEE_OTHER
+    );
 
     app.shutdown().await;
 }

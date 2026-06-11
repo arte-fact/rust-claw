@@ -140,9 +140,18 @@ folder — see CLAUDE.md §"UI verification".**
       is the first `Approval` command. Tests: gate holds vs. executes, `execute_approved`, and a full
       scripted-LLM e2e (agent delete held → owner Allow → endpoint removed). Screenshot:
       `screenshots/approval-card.png`. (§9.1, §10)
-- [ ] **7.3 Web admin.** Registry-driven tables + forms (groups incl. provider/endpoint/model
-      dropdowns, wirings, endpoints, users/roles), bespoke Tasks page (next fire via the cron evaluator,
-      pause/resume/cancel). Visual verification: snapshot each generated resource page. (§9.2)
+- [x] **7.3a Web admin — registry-driven resources.** `/admin/{resource}` pages generated from the
+      command registry: a list table (from the no-required-args `<resource>-list`) plus a form per
+      mutating command (reads — `-list`/`-get` — excluded), with `ArgKind` driving inputs
+      (Text→input, Bool→checkbox, Enum→select; the `endpoint` field is a live dropdown of configured
+      endpoints). `POST /admin/run` coerces the form per `ArgSpec` and dispatches as `Host` (operator —
+      so `Hidden` commands like `roles-grant` are available here); failures redirect back with a flash.
+      Linked from the chat sidebar. Tests: page renders forms/tables, create-runs-as-Host, Enum select,
+      Hidden-shown, unknown-resource redirect. Screenshots: `admin-endpoints.png`, `admin-groups.png`
+      (full dropdowns), `admin-roles.png`. (§9.2)
+- [ ] **7.3b Web admin — Tasks page.** Bespoke cross-session Tasks view: scan active sessions →
+      `list_scheduled_tasks`, next fire via the cron evaluator, pause/resume/cancel actions. Visual
+      verification: snapshot the Tasks page. (§9.2, §10)
 
 ## M8 — Packaging
 

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw — admin</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="logo">claw</div>
+    <ul class="chat-list">
+      {% for resource in resources %}
+      <li>
+        <a class="chat-link{% if resource.active %} chat-link--active{% endif %}"
+           href="/admin/{{ resource.name }}">
+          <span class="chat-name">{{ resource.name }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    <a class="admin-back" href="/">← chats</a>
+  </nav>
+  <main class="chat admin">
+    <header class="chat-header"><h1>{{ current }}</h1></header>
+    <section class="admin-body">
+      {% if let Some(message) = error %}
+      <p class="admin-error">{{ message }}</p>
+      {% endif %}
+
+      {% if let Some(table) = table %}
+      <table class="admin-table">
+        <thead>
+          <tr>{% for column in table.columns %}<th>{{ column }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for row in table.rows %}
+          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if table.rows.is_empty() %}<p class="admin-empty">no rows</p>{% endif %}
+      {% endif %}
+
+      {% for form in forms %}
+      <form class="admin-form" method="post" action="/admin/run">
+        <h2>{{ form.command }}</h2>
+        <p class="admin-form-summary">{{ form.summary }}</p>
+        <input type="hidden" name="command" value="{{ form.command }}">
+        {% for field in form.fields %}
+        <label class="admin-field">
+          <span class="admin-field-label">{{ field.label }}{% if field.required %} *{% endif %}</span>
+          {% if field.input == "bool" %}
+          <input type="checkbox" name="{{ field.name }}">
+          {% else if field.input == "select" %}
+          <select name="{{ field.name }}"{% if field.required %} required{% endif %}>
+            <option value="">—</option>
+            {% for option in field.options %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+          </select>
+          {% else %}
+          <input type="text" name="{{ field.name }}"{% if field.required %} required{% endif %}
+                 autocomplete="off">
+          {% endif %}
+        </label>
+        {% endfor %}
+        <button type="submit">{{ form.command }}</button>
+      </form>
+      {% endfor %}
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -572,11 +572,13 @@ and mobile-first layout (responsive collapse only).
 ### 9.2 Admin = the command registry, rendered
 
 No bespoke admin screens. `CommandDef` args carry display metadata (label, type, enum options,
-required), and the admin section generates itself from the registry: each resource (groups,
-wirings, schedules, users/roles, sessions) is a table from its `list` command plus forms from
-`create`/`update`. One dispatch path, three transports — unix socket (CLI), `system` rows
-(agents), HTTP (web) — with the same access/approval gates. Any command a fork registers appears
-in the web admin with zero UI work.
+required), and the admin section generates itself from the registry (M7.3a): `/admin/{resource}`
+renders a table from the resource's no-required-args `list` command plus a form per mutating
+command, with `ArgKind` driving inputs (Text→input, Bool→checkbox, Enum→`<select>`; the `endpoint`
+field becomes a live dropdown of configured endpoints). `POST /admin/run` coerces the form by each
+`ArgSpec` and dispatches as `Host`. One dispatch path, two live transports — unix socket (CLI) and
+HTTP (web admin), plus the in-process `admin` tool (agents, M6.4) — all under the same
+`cli_scope`/approval gates. Any command a fork registers appears in the web admin with zero UI work.
 
 The one bespoke admin view is **Tasks**: scheduled messages across all groups with cron
 expression, next fire (cron evaluator), last result, and pause/resume/cancel — the page you actually check

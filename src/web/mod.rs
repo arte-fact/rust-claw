@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod pages;
@@ -45,6 +46,9 @@ pub fn build_app(state: WebState) -> Router {
             "/api/approvals/{approval_id}/answer",
             axum::routing::post(api::answer_approval),
         )
+        .route("/admin", get(admin::index))
+        .route("/admin/{resource}", get(admin::resource_page))
+        .route("/admin/run", axum::routing::post(admin::run))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

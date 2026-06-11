@@ -24,6 +24,7 @@
     <form class="new-chat" method="post" action="/chats">
       <input name="name" placeholder="+ new chat" required autocomplete="off">
     </form>
+    <a class="admin-back" href="/admin/endpoints">⚙ admin</a>
   </nav>
   <main class="chat">
     {% if let Some(current) = current %}

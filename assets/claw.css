@@ -274,6 +274,89 @@ button:hover { background: var(--color-surface-raised); }
 }
 .qcard-check { color: var(--color-ok); font-weight: 700; }
 
+/* ── admin: registry-driven tables + forms (§9.2) ──────────────────── */
+
+.admin-back {
+  margin-top: var(--space-3);
+  padding: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+.admin-back:hover { color: var(--color-accent); }
+
+.admin-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.admin-error {
+  border: var(--border);
+  border-left: 2px solid var(--color-error);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-3);
+  color: var(--color-text-strong);
+}
+
+.admin-empty { color: var(--color-text-muted); font-size: var(--text-sm); }
+
+.admin-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-sm);
+}
+.admin-table th, .admin-table td {
+  border: var(--border);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+.admin-table th { color: var(--color-accent); font-weight: 700; }
+.admin-table tbody tr:hover { background: var(--color-surface); }
+
+.admin-form {
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 60ch;
+}
+.admin-form h2 { font-size: var(--text-md); color: var(--color-text-strong); }
+.admin-form-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
+
+.admin-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.admin-field-label { font-size: var(--text-xs); color: var(--color-text-muted); }
+.admin-field input[type="text"], .admin-field select {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+}
+.admin-field input:focus, .admin-field select:focus { outline: var(--focus); }
+
+.admin-form button {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+.admin-form button:hover { border-color: var(--color-accent); color: var(--color-text-strong); }
+
 /* ── composer ──────────────────────────────────────────────────────── */
 
 .composer {
