@@ -1,6 +1,7 @@
 pub mod app;
 mod blocking;
 pub mod channels;
+pub mod circuit_breaker;
 pub mod cli_client;
 pub mod cli_server;
 pub mod commands;
@@ -12,6 +13,7 @@ pub mod logging;
 pub mod modules;
 pub mod protocol;
 pub mod providers;
+pub mod recovery;
 pub mod router;
 pub mod runs;
 pub mod session;

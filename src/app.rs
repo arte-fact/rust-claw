@@ -13,7 +13,7 @@ use crate::protocol::entities::AgentProviderKind;
 use crate::router::Router;
 use crate::runs::queue::RunQueue;
 use crate::runs::supervisor::Supervisor;
-use crate::session::SessionStore;
+use crate::session::{SessionStore, SessionStoreError};
 use crate::web::auth::AuthState;
 use crate::web::sse::Hub;
 use crate::web::{WebState, build_app};
@@ -26,6 +26,8 @@ const BOOTSTRAP_PROVIDER: AgentProviderKind = AgentProviderKind::Echo;
 pub enum AppError {
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error(transparent)]
+    Session(#[from] SessionStoreError),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -52,6 +54,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     bootstrap_default_agent_group(&central).await?;
 
     let store = Arc::new(SessionStore::new(config.sessions_dir()));
+    recover_stuck_runs(&central, &store).await?;
     let queue = Arc::new(RunQueue::new());
     let hub = Hub::new();
     let web_channel = Arc::new(WebChannel::new(central.clone(), hub.clone()));
@@ -134,6 +137,28 @@ async fn bootstrap_default_agent_group(central: &Arc<CentralDb>) -> Result<(), A
             }
             Ok(())
         })
+    })
+    .await
+}
+
+/// On startup, revert any `processing` message left by a crashed run back to
+/// `pending` (§8.2) — a run cannot outlive its supervising process.
+async fn recover_stuck_runs(
+    central: &Arc<CentralDb>,
+    store: &Arc<SessionStore>,
+) -> Result<(), AppError> {
+    let central = central.clone();
+    let store = store.clone();
+    crate::blocking::run::<_, AppError, AppError>(move || {
+        let active = central.with(crate::db::sessions::list_active)?;
+        for session in active {
+            let db = store.open(&session.agent_group_id, &session.id)?;
+            let reset = db.reset_processing_to_pending()?;
+            if reset > 0 {
+                tracing::warn!(session = %session.id, count = reset, "reset stuck processing rows");
+            }
+        }
+        Ok(())
     })
     .await
 }

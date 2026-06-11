@@ -94,7 +94,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **5.2 Task lifecycle.** `schedule_task` system action → `messages_in` insert;
       list/cancel/pause/resume/update actions; task formatting (`<task>`, pre-script,
       `wake_agent=false`). End-to-end schedule-fire-reply test. (§8.6)
-- [ ] **5.3 Watchdog + recovery.** No-event watchdog (pure decision fn + kill), retry backoff
+- [x] **5.3 Watchdog + recovery.** No-event watchdog (pure decision fn + kill), retry backoff
       (`5s·2^tries`, 5 → failed), startup `processing→pending` reset, circuit breaker file.
       Tests for every decision branch. (§8.2)
 

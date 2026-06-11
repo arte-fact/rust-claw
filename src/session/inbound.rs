@@ -133,6 +133,45 @@ impl SessionDb {
             )
         })
     }
+
+    /// Crash recovery: a run cannot outlive the process that supervises it, so on
+    /// startup any row still `processing` reverts to `pending`. Returns the count.
+    pub fn reset_processing_to_pending(&self) -> Result<usize, SessionStoreError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE messages_in SET status = 'pending' WHERE status = 'processing'",
+                [],
+            )
+        })
+    }
+
+    /// Reschedule a failed attempt for a later retry with an updated try count.
+    pub fn reschedule_retry(
+        &self,
+        id: &MessageInId,
+        tries: i64,
+        process_after: &str,
+    ) -> Result<(), SessionStoreError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE messages_in SET status = 'pending', tries = ?2, process_after = ?3
+                 WHERE id = ?1",
+                params![id, tries, process_after],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Abandon a message after its retries are exhausted.
+    pub fn fail_message(&self, id: &MessageInId, tries: i64) -> Result<(), SessionStoreError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE messages_in SET status = 'failed', tries = ?2 WHERE id = ?1",
+                params![id, tries],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 pub(super) fn highest_seq(conn: &Connection) -> Result<Option<Seq>, rusqlite::Error> {

@@ -161,9 +161,12 @@ impl Supervisor {
                     .await?;
                 }
                 Err(message) => {
-                    tracing::error!(session = %session.id, error = %message, "agent turn failed");
+                    tracing::warn!(session = %session.id, error = %message, "agent turn failed");
                     let db = db.clone();
-                    blocking(move || db.mark_status(&ids, MessageStatus::Failed)).await?;
+                    let batch = batch.clone();
+                    blocking(move || apply_retry_backoff(&db, &batch)).await?;
+                    // One failure ends this session's drain; the sweep re-wakes it when due.
+                    break;
                 }
             }
         }
@@ -258,17 +261,44 @@ fn draft_prompt(batch: &[InboundMessage]) -> String {
         .join("\n")
 }
 
-/// Per-batch turn: no follow-ups are pushed; the drain loop handles new arrivals.
-async fn consume_run(mut run: ActiveRun) -> Result<Option<String>, String> {
-    drop(run.input);
-    while let Some(event) = run.events.recv().await {
-        match event {
-            ProviderEvent::TurnEnd { text } => return Ok(text),
-            ProviderEvent::Error { message, .. } => return Err(message),
-            ProviderEvent::Activity | ProviderEvent::Progress { .. } => {}
+/// Increments each batch message's tries and either reschedules it with
+/// exponential backoff or fails it once retries are exhausted (§8.2).
+fn apply_retry_backoff(db: &SessionDb, batch: &[InboundMessage]) -> Result<(), SessionStoreError> {
+    let now = db.now_timestamp()?;
+    for message in batch {
+        let tries = message.tries + 1;
+        match crate::recovery::retry_decision(tries, crate::recovery::MAX_TRIES) {
+            crate::recovery::Retry::Fail => db.fail_message(&message.id, tries)?,
+            crate::recovery::Retry::After(delay) => {
+                let process_after = crate::recovery::add_seconds_utc(&now, delay.as_secs())
+                    .unwrap_or_else(|| now.clone());
+                db.reschedule_retry(&message.id, tries, &process_after)?;
+            }
         }
     }
-    Err("agent run ended without a result".to_owned())
+    Ok(())
+}
+
+/// Per-batch turn: no follow-ups are pushed; the drain loop handles new arrivals.
+/// A run that goes silent past the watchdog deadline is aborted and treated as a
+/// (retryable) failure.
+async fn consume_run(mut run: ActiveRun) -> Result<Option<String>, String> {
+    drop(run.input);
+    loop {
+        match tokio::time::timeout(crate::recovery::WATCHDOG_TIMEOUT, run.events.recv()).await {
+            Err(_) => {
+                run.abort.cancel();
+                return Err(format!(
+                    "watchdog: no activity for {}s",
+                    crate::recovery::WATCHDOG_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => return Err("agent run ended without a result".to_owned()),
+            Ok(Some(ProviderEvent::TurnEnd { text })) => return Ok(text),
+            Ok(Some(ProviderEvent::Error { message, .. })) => return Err(message),
+            Ok(Some(ProviderEvent::Activity | ProviderEvent::Progress { .. })) => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,20 +411,94 @@ mod tests {
         assert_eq!(db.pending_due(&now, 10).expect("due").len(), 1);
     }
 
+    struct FailingProvider;
+    impl AgentProvider for FailingProvider {
+        fn start(&self, _input: QueryInput) -> Result<ActiveRun, ProviderError> {
+            let (input_tx, _input_rx) = mpsc::channel(1);
+            let (event_tx, event_rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Error {
+                        message: "boom".to_owned(),
+                        retryable: true,
+                    })
+                    .await;
+            });
+            Ok(ActiveRun {
+                input: input_tx,
+                events: event_rx,
+                abort: CancellationToken::new(),
+            })
+        }
+    }
+
+    fn failing_supervisor(fix: &Fixture) -> Supervisor {
+        Supervisor::with_factory(
+            fix.central.clone(),
+            fix.store.clone(),
+            fix.queue.clone(),
+            run_config(fix),
+            Box::new(|_| Ok(Arc::new(FailingProvider))),
+        )
+    }
+
     #[tokio::test]
-    async fn provider_error_event_marks_the_batch_failed() {
-        struct FailingProvider;
-        impl AgentProvider for FailingProvider {
+    async fn provider_error_reschedules_with_backoff_then_fails() {
+        let fix = fixture(AgentProviderKind::Echo);
+        write_chat(&fix, "hello");
+        let db = session_db(&fix);
+
+        // First four failures reschedule the message (pending, future, tries bumped).
+        for expected_tries in 1..=4 {
+            failing_supervisor(&fix)
+                .run_session(&fix.session_id)
+                .await
+                .expect("run");
+            let all = db
+                .pending_due("2999-12-31T00:00:00.000Z", 10)
+                .expect("pending");
+            assert_eq!(all.len(), 1, "still pending after failure {expected_tries}");
+            assert_eq!(all[0].tries, expected_tries);
+            assert!(
+                all[0].process_after.is_some(),
+                "rescheduled into the future"
+            );
+            // Make it due again for the next attempt.
+            db.reschedule_retry(&all[0].id, all[0].tries, "2000-01-01T00:00:00.000Z")
+                .expect("force due");
+        }
+
+        // The fifth failure exhausts retries → failed, no longer pending.
+        failing_supervisor(&fix)
+            .run_session(&fix.session_id)
+            .await
+            .expect("run");
+        assert!(
+            db.pending_due("2999-12-31T00:00:00.000Z", 10)
+                .expect("pending")
+                .is_empty(),
+            "message must be failed, not pending"
+        );
+        assert!(
+            db.due_outbound("2999-12-31T00:00:00.000Z")
+                .expect("out")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_run_trips_the_watchdog_and_retries() {
+        // A provider that never emits and keeps its channel open: the watchdog must
+        // fire. Paused time auto-advances to the watchdog deadline.
+        struct SilentProvider;
+        impl AgentProvider for SilentProvider {
             fn start(&self, _input: QueryInput) -> Result<ActiveRun, ProviderError> {
                 let (input_tx, _input_rx) = mpsc::channel(1);
-                let (event_tx, event_rx) = mpsc::channel(1);
+                let (event_tx, event_rx) = mpsc::channel::<ProviderEvent>(1);
+                // Hold the sender forever so the event channel never closes.
                 tokio::spawn(async move {
-                    let _ = event_tx
-                        .send(ProviderEvent::Error {
-                            message: "boom".to_owned(),
-                            retryable: false,
-                        })
-                        .await;
+                    let _keep = event_tx;
+                    std::future::pending::<()>().await;
                 });
                 Ok(ActiveRun {
                     input: input_tx,
@@ -411,14 +515,17 @@ mod tests {
             fix.store.clone(),
             fix.queue.clone(),
             run_config(&fix),
-            Box::new(|_| Ok(Arc::new(FailingProvider))),
+            Box::new(|_| Ok(Arc::new(SilentProvider))),
         );
         sup.run_session(&fix.session_id).await.expect("run");
 
+        // Treated as a retryable failure: rescheduled, tries bumped, still pending.
         let db = session_db(&fix);
-        let now = db.now_timestamp().expect("now");
-        assert!(db.pending_due(&now, 10).expect("due").is_empty());
-        assert!(db.due_outbound(&now).expect("outbound").is_empty());
+        let all = db
+            .pending_due("2999-12-31T00:00:00.000Z", 10)
+            .expect("pending");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].tries, 1);
     }
 
     #[tokio::test]

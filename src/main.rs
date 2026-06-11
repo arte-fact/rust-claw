@@ -39,6 +39,16 @@ async fn run(config: Config) -> anyhow::Result<()> {
         port = config.port,
         "claw starting"
     );
+    let circuit_breaker = claw::circuit_breaker::CircuitBreaker::new(&config.data_dir);
+    let backoff = circuit_breaker.record_start(jiff::Timestamp::now());
+    if !backoff.is_zero() {
+        tracing::warn!(
+            seconds = backoff.as_secs(),
+            "crash-loop detected — backing off before starting"
+        );
+        tokio::time::sleep(backoff).await;
+    }
+
     let app = claw::app::build(&config).await?;
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, config.port)).await?;
@@ -55,6 +65,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("shutdown signal received, exiting");
     server.abort();
     app.shutdown().await;
+    circuit_breaker.clear(); // clean exit — next start resets the crash counter
     Ok(())
 }
 
