@@ -6,10 +6,10 @@ use crate::commands::registry::{
 };
 use crate::db::agent_groups::{self, AgentGroup};
 use crate::db::endpoints::{self, Endpoint};
-use crate::db::{CentralDb, messaging_groups};
-use crate::protocol::entities::{AgentProviderKind, CliScope, ToolProfile};
+use crate::db::{CentralDb, messaging_groups, users};
+use crate::protocol::entities::{AgentProviderKind, CliScope, Role, ToolProfile};
 use crate::protocol::frame::FrameError;
-use crate::protocol::ids::{AgentGroupId, EndpointName};
+use crate::protocol::ids::{AgentGroupId, EndpointName, UserId};
 
 /// Every registered command. Adding a resource means adding its definitions here.
 #[must_use]
@@ -17,6 +17,7 @@ pub fn all() -> Vec<CommandDef> {
     let mut commands = endpoint_commands();
     commands.extend(group_commands());
     commands.extend(wiring_commands());
+    commands.extend(role_commands());
     commands
 }
 
@@ -365,6 +366,117 @@ fn wiring_commands() -> Vec<CommandDef> {
             Ok(Value::Array(rows))
         },
     }]
+}
+
+// ── roles (owner / admin grants) ────────────────────────────────────────
+
+fn role_commands() -> Vec<CommandDef> {
+    const USER: ArgSpec = ArgSpec {
+        name: "user",
+        label: "User id (e.g. web:owner)",
+        kind: ArgKind::Text,
+        required: true,
+    };
+    const ROLE: ArgSpec = ArgSpec {
+        name: "role",
+        label: "Role",
+        kind: ArgKind::Enum(&["owner", "admin"]),
+        required: true,
+    };
+    const SCOPE: ArgSpec = ArgSpec {
+        name: "agent_group",
+        label: "Agent group (admin only; omit for global)",
+        kind: ArgKind::Text,
+        required: false,
+    };
+    vec![
+        CommandDef {
+            name: "roles-list",
+            summary: "List a user's role grants",
+            resource: "roles",
+            access: Access::Open,
+            args: &[USER],
+            handler: |args, _caller, db| {
+                let user = UserId::new(require_str(args, "user")?);
+                let grants = db
+                    .with(|conn| users::roles_for(conn, &user))
+                    .map_err(handler_error)?;
+                Ok(Value::Array(
+                    grants
+                        .iter()
+                        .map(|grant| {
+                            json!({
+                                "role": grant.role.as_str(),
+                                "agent_group": grant.agent_group_id,
+                            })
+                        })
+                        .collect(),
+                ))
+            },
+        },
+        CommandDef {
+            name: "roles-grant",
+            summary: "Grant owner (global) or admin (global or scoped to a group)",
+            resource: "roles",
+            access: Access::Hidden, // operator-only — agents must not grant themselves power
+            args: &[USER, ROLE, SCOPE],
+            handler: roles_grant,
+        },
+        CommandDef {
+            name: "roles-revoke",
+            summary: "Revoke a role grant",
+            resource: "roles",
+            access: Access::Hidden,
+            args: &[USER, ROLE, SCOPE],
+            handler: roles_revoke,
+        },
+    ]
+}
+
+fn roles_grant(
+    args: &Map<String, Value>,
+    _caller: &CallerContext,
+    db: &CentralDb,
+) -> Result<Value, FrameError> {
+    let user = UserId::new(require_str(args, "user")?);
+    let role: Role = require_str(args, "role")?
+        .parse()
+        .map_err(|_| invalid("role must be owner or admin"))?;
+    let scope = opt_str(args, "agent_group").map(AgentGroupId::new);
+    if role == Role::Owner && scope.is_some() {
+        return Err(invalid("owner is global; do not pass agent_group"));
+    }
+    db.with(|conn| {
+        users::upsert(
+            conn,
+            &user,
+            user.as_str().split(':').next().unwrap_or("web"),
+            None,
+        )?;
+        users::grant_role(conn, &user, role, scope.as_ref(), None)
+    })
+    .map_err(handler_error)?;
+    Ok(json!({ "granted": role.as_str(), "user": user }))
+}
+
+fn roles_revoke(
+    args: &Map<String, Value>,
+    _caller: &CallerContext,
+    db: &CentralDb,
+) -> Result<Value, FrameError> {
+    let user = UserId::new(require_str(args, "user")?);
+    let role: Role = require_str(args, "role")?
+        .parse()
+        .map_err(|_| invalid("role must be owner or admin"))?;
+    let scope = opt_str(args, "agent_group").map(AgentGroupId::new);
+    let revoked = db
+        .with(|conn| users::revoke_role(conn, &user, role, scope.as_ref()))
+        .map_err(handler_error)?;
+    if revoked {
+        Ok(json!({ "revoked": role.as_str(), "user": user }))
+    } else {
+        Err(not_found("no such grant"))
+    }
 }
 
 /// Parses an optional kebab/text enum argument, surfacing a clear error.

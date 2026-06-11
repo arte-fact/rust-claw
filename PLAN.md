@@ -105,9 +105,18 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **6.2 Command registry + CLI client.** `CommandDef` with arg display metadata (§9.2),
       generic CRUD generation per resource, `claw <resource> <verb>` subcommands + table output.
       Tests: registry → CLI → socket → dispatch round-trip.
-- [ ] **6.3 Agent transport + gates.** `system`-row CLI transport, `cli_scope` enforcement
-      (disabled/group/global, auto-fill own group), router command gate (pass/filter/deny against
-      `user_roles`). Tests. (§10)
+- [x] **6.3 Command gates.** `cli_scope` enforcement (disabled/group/global, whitelisted
+      resources, own-group auto-fill/cross-check, no self-`cli_scope` change), `Access::Hidden`
+      operator-only gating, and `roles` resource (list/grant/revoke, owner-global invariant).
+      Enforced at the `Dispatcher` so every caller path is gated; tested in isolation and through
+      the real registry with an `Agent` caller. The router "command gate" is N/A post-pi (the
+      native loop has no slash commands the router interprets); revisit if operator slash-commands
+      land. (§10)
+- [ ] **6.4 Agent-facing CLI transport.** Give coder-profile agents an `admin` tool that reaches
+      the command registry as `CallerContext::Agent` (threading a `Dispatcher` handle + caller
+      identity — `agent_group_id`/`session_id` — through `QueryInput` into the native tool layer),
+      so in-chat self-service ("switch to gemini") works under the 6.3 gates. Deferred behind
+      operator-driven config (the `claw` CLI already covers MVP admin as `Host`). Tests. (§8.5, §10)
 
 ## M7 — Interactivity + approvals
 

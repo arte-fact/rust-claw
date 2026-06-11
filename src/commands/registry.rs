@@ -85,19 +85,20 @@ impl Dispatcher for Registry {
             );
         };
 
-        // Agent-caller scope enforcement (disabled/group/global, approvals) lands
-        // in M6.3 / M7.2; for now only `Hidden` is operator-only.
-        if caller.is_agent() && def.access == Access::Hidden {
-            return ResponseFrame::error(
-                id,
-                ErrorCode::Forbidden,
-                "command not available to agents",
-            );
-        }
+        let args = match self.gate_for_agent(def, &caller, request.args).await {
+            Ok(args) => args,
+            Err(error) => {
+                return ResponseFrame {
+                    id,
+                    ok: false,
+                    data: None,
+                    error: Some(error),
+                };
+            }
+        };
 
         let handler = def.handler;
         let central = self.central.clone();
-        let args = request.args;
         let result = tokio::task::spawn_blocking(move || handler(&args, &caller, &central)).await;
         match result {
             Ok(Ok(data)) => ResponseFrame::ok(id, data),
@@ -109,6 +110,42 @@ impl Dispatcher for Registry {
             },
             Err(join) => ResponseFrame::error(id, ErrorCode::HandlerError, join.to_string()),
         }
+    }
+}
+
+impl Registry {
+    /// Host callers pass through; agent callers are gated by their group's
+    /// `cli_scope` (and `Hidden` commands are operator-only).
+    async fn gate_for_agent(
+        &self,
+        def: &CommandDef,
+        caller: &CallerContext,
+        args: Map<String, Value>,
+    ) -> Result<Map<String, Value>, FrameError> {
+        let CallerContext::Agent { agent_group_id, .. } = caller else {
+            return Ok(args);
+        };
+        if def.access == Access::Hidden {
+            return Err(FrameError {
+                code: ErrorCode::Forbidden,
+                message: "command not available to agents".to_owned(),
+            });
+        }
+        let central = self.central.clone();
+        let group = agent_group_id.clone();
+        let scope = tokio::task::spawn_blocking(move || {
+            central.with(|conn| crate::db::agent_groups::get(conn, &group))
+        })
+        .await
+        .map_err(|join| FrameError {
+            code: ErrorCode::HandlerError,
+            message: join.to_string(),
+        })?
+        .map_err(handler_error)?
+        .map(|group| group.cli_scope)
+        .unwrap_or(crate::protocol::entities::CliScope::Disabled);
+
+        super::gates::enforce_cli_scope(scope, def, agent_group_id, args)
     }
 }
 
@@ -146,5 +183,96 @@ pub(super) fn handler_error(error: impl std::fmt::Display) -> FrameError {
     FrameError {
         code: ErrorCode::HandlerError,
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::agent_groups;
+    use crate::protocol::entities::CliScope;
+    use crate::protocol::ids::{AgentGroupId, SessionId};
+
+    fn registry_with_group(scope: CliScope) -> (Registry, AgentGroupId) {
+        let central = Arc::new(CentralDb::open_in_memory().expect("open"));
+        let group_id = central
+            .with(|conn| {
+                let mut group = agent_groups::create(conn, "coder", "coder")?;
+                group.cli_scope = scope;
+                agent_groups::update(conn, &group)?;
+                Ok(group.id)
+            })
+            .expect("seed group");
+        (Registry::new(central), group_id)
+    }
+
+    fn agent_caller(group_id: &AgentGroupId) -> CallerContext {
+        CallerContext::Agent {
+            session_id: SessionId::new("s-test"),
+            agent_group_id: group_id.clone(),
+            messaging_group_id: None,
+        }
+    }
+
+    fn request(command: &str, args: &[(&str, &str)]) -> RequestFrame {
+        RequestFrame {
+            id: "req-1".to_owned(),
+            command: command.to_owned(),
+            args: args
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), Value::String((*v).to_owned())))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_with_group_scope_may_not_touch_endpoints() {
+        let (registry, group_id) = registry_with_group(CliScope::Group);
+        let response = registry
+            .dispatch(request("endpoints-list", &[]), agent_caller(&group_id))
+            .await;
+        assert_eq!(response.error.expect("denied").code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn agent_with_group_scope_is_confined_to_its_own_group() {
+        let (registry, group_id) = registry_with_group(CliScope::Group);
+        let response = registry
+            .dispatch(
+                request("groups-update", &[("id", "ag-someone-else")]),
+                agent_caller(&group_id),
+            )
+            .await;
+        assert_eq!(response.error.expect("denied").code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn agent_may_not_run_hidden_role_commands() {
+        let (registry, group_id) = registry_with_group(CliScope::Global);
+        let response = registry
+            .dispatch(
+                request("roles-grant", &[("user", "web:x"), ("role", "owner")]),
+                agent_caller(&group_id),
+            )
+            .await;
+        assert_eq!(response.error.expect("denied").code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn disabled_scope_blocks_even_open_commands() {
+        let (registry, group_id) = registry_with_group(CliScope::Disabled);
+        let response = registry
+            .dispatch(request("groups-list", &[]), agent_caller(&group_id))
+            .await;
+        assert_eq!(response.error.expect("denied").code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn host_caller_bypasses_scope_gating() {
+        let (registry, _group_id) = registry_with_group(CliScope::Disabled);
+        let response = registry
+            .dispatch(request("groups-list", &[]), CallerContext::Host)
+            .await;
+        assert!(response.ok, "host must not be scope-gated");
     }
 }
