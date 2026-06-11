@@ -5,6 +5,7 @@ pub mod cli_client;
 pub mod cli_server;
 pub mod commands;
 pub mod config;
+pub mod cron;
 pub mod db;
 pub mod delivery;
 pub mod logging;

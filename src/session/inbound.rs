@@ -133,6 +133,71 @@ impl SessionDb {
             )
         })
     }
+
+    /// Completed rows that still carry a `recurrence` — each owes one next occurrence.
+    pub fn completed_recurrences(&self) -> Result<Vec<InboundMessage>, SessionStoreError> {
+        self.with(|conn| {
+            conn.prepare(&format!(
+                "{SELECT_INBOUND}
+                 WHERE status = 'completed' AND recurrence IS NOT NULL
+                 ORDER BY seq"
+            ))?
+            .query_map([], from_row)?
+            .collect()
+        })
+    }
+
+    /// Inserts the next occurrence (new pending row, same content/kind/recurrence/
+    /// series, given `process_after`) and clears the completed row's recurrence so
+    /// it is advanced exactly once. Clearing happens first: a crash mid-call drops
+    /// an occurrence rather than duplicating one.
+    pub fn advance_recurrence(
+        &self,
+        completed: &InboundMessage,
+        next_process_after: &str,
+    ) -> Result<(), SessionStoreError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE messages_in SET recurrence = NULL WHERE id = ?1",
+                params![completed.id],
+            )?;
+            let seq = Seq::next_claw_after(highest_seq(conn)?);
+            let id = MessageInId::new(generate_id("in"));
+            conn.execute(
+                "INSERT INTO messages_in
+                   (id, seq, kind, timestamp, status, process_after, recurrence, series_id,
+                    trigger, platform_id, channel_type, thread_id, content, source_session_id)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'pending', ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    id,
+                    seq,
+                    completed.kind,
+                    next_process_after,
+                    completed.recurrence,
+                    completed.series_id,
+                    completed.trigger,
+                    completed.routing.platform_id,
+                    completed.routing.channel_type,
+                    completed.routing.thread_id,
+                    completed.content,
+                    completed.source_session_id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Drops a recurrence that can no longer advance (e.g. an unparseable cron).
+    pub fn clear_recurrence(&self, id: &MessageInId) -> Result<(), SessionStoreError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE messages_in SET recurrence = NULL WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 pub(super) fn highest_seq(conn: &Connection) -> Result<Option<Seq>, rusqlite::Error> {

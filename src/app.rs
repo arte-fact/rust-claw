@@ -91,6 +91,14 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     let delivery = Arc::new(Delivery::new(central.clone(), store.clone(), registry));
     tasks.spawn(delivery.run(cancel.clone()));
 
+    let sweep = Arc::new(crate::sweep::Sweep::new(
+        central.clone(),
+        store.clone(),
+        queue.clone(),
+        &config.timezone,
+    ));
+    tasks.spawn(sweep.run(cancel.clone()));
+
     let state = WebState {
         auth: Arc::new(AuthState::from_configured_token(config.auth_token.clone())),
         central,

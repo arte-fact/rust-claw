@@ -563,7 +563,7 @@ wirings, schedules, users/roles, sessions) is a table from its `list` command pl
 in the web admin with zero UI work.
 
 The one bespoke admin view is **Tasks**: scheduled messages across all groups with cron
-expression, next fire (croner), last result, and pause/resume/cancel — the page you actually check
+expression, next fire (cron evaluator), last result, and pause/resume/cancel — the page you actually check
 daily.
 
 ---
@@ -582,7 +582,7 @@ These port from the first draft with containers subtracted:
   destination permission check + `adapter.deliver()` + ledger + outbox cleanup. 3 attempts →
   failed.
 - **Sweep** (`sweep.rs`): due `process_after` rows → enqueue; due `deliver_after` → deliver;
-  recurrence advance computed **from scheduled time, not wall clock** (croner), same `series_id`;
+  recurrence advance computed grid-aligned via the in-house jiff cron evaluator, same `series_id`;
   run watchdog (§8.2).
 - **Central DB**: NanoClaw's schema minus container tables: `agent_groups` (+ per-group
   provider/endpoint/model config, §8.7), `messaging_groups`, `messaging_group_agents`, `users`,
@@ -645,7 +645,7 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
 | `tracing`, `tracing-subscriber` | structured logs |
 | `clap` (derive) | `serve` + admin subcommands |
 | `jiff` | timezone-aware timestamps (IANA tz for the formatter) |
-| `croner` | cron recurrence |
+| (in-house) | cron recurrence — a small jiff-based evaluator, no chrono dependency |
 | `ulid` | sortable ids |
 | `tokio-util` | `CancellationToken` |
 | `regex` | engage patterns, command gate |

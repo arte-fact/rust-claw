@@ -89,8 +89,8 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M5 — Scheduling + resilience
 
-- [ ] **5.1 Sweep.** 60s task: due `process_after` → enqueue, due `deliver_after` → deliver,
-      recurrence advance (croner, scheduled-time-based, `series_id`). Time-injected tests. (§10)
+- [x] **5.1 Sweep.** 60s task: due `process_after` → enqueue, due `deliver_after` → deliver,
+      recurrence advance (in-house jiff cron, grid-aligned, `series_id`). Time-injected tests. (§10)
 - [ ] **5.2 Task lifecycle.** `schedule_task` system action → `messages_in` insert;
       list/cancel/pause/resume/update actions; task formatting (`<task>`, pre-script,
       `wake_agent=false`). End-to-end schedule-fire-reply test. (§8.6)
@@ -117,7 +117,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [ ] **7.2 Approvals.** `Access::Approval` gating, `pick_approver` (owner for web-first),
       approval cards in the UI slot, allow/deny → action execution + `system` result row. Tests. (§10)
 - [ ] **7.3 Web admin.** Registry-driven tables + forms (groups incl. provider/endpoint/model
-      dropdowns, wirings, endpoints, users/roles), bespoke Tasks page (next fire via croner,
+      dropdowns, wirings, endpoints, users/roles), bespoke Tasks page (next fire via the cron evaluator,
       pause/resume/cancel). Visual verification: snapshot each generated resource page. (§9.2)
 
 ## M8 — Packaging
