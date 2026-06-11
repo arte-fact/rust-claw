@@ -244,6 +244,52 @@ fn group_commands() -> Vec<CommandDef> {
             },
         },
         CommandDef {
+            name: "groups-create",
+            summary: "Create a new agent group (+ a web chat wired to it)",
+            // Significant: an agent spawning another agent needs owner approval (M7.2/M9.1).
+            access: Access::Approval,
+            resource: "groups",
+            args: &[
+                ArgSpec {
+                    name: "name",
+                    label: "Name",
+                    kind: ArgKind::Text,
+                    required: true,
+                },
+                ArgSpec {
+                    name: "agent_provider",
+                    label: "Provider",
+                    kind: ArgKind::Enum(&["native", "echo"]),
+                    required: false,
+                },
+                ArgSpec {
+                    name: "endpoint",
+                    label: "Endpoint",
+                    kind: ArgKind::Text,
+                    required: false,
+                },
+                ArgSpec {
+                    name: "model",
+                    label: "Model",
+                    kind: ArgKind::Text,
+                    required: false,
+                },
+                ArgSpec {
+                    name: "tool_profile",
+                    label: "Tool profile",
+                    kind: ArgKind::Enum(&["chat", "coder"]),
+                    required: false,
+                },
+                ArgSpec {
+                    name: "cli_scope",
+                    label: "CLI scope",
+                    kind: ArgKind::Enum(&["disabled", "group", "global"]),
+                    required: false,
+                },
+            ],
+            handler: groups_create,
+        },
+        CommandDef {
             name: "groups-update",
             summary: "Update an agent group's provider/endpoint/model/profile",
             resource: "groups",
@@ -295,6 +341,71 @@ fn group_commands() -> Vec<CommandDef> {
             handler: groups_update,
         },
     ]
+}
+
+fn groups_create(
+    args: &Map<String, Value>,
+    _caller: &CallerContext,
+    db: &CentralDb,
+) -> Result<Value, FrameError> {
+    let name = require_str(args, "name")?;
+    let folder = opt_str(args, "folder").unwrap_or_else(|| slugify(&name));
+    if folder.is_empty() {
+        return Err(invalid(
+            "name must contain at least one alphanumeric character",
+        ));
+    }
+    let provider = parse_enum::<AgentProviderKind>(args, "agent_provider")?;
+    let profile = parse_enum::<ToolProfile>(args, "tool_profile")?;
+    let scope = parse_enum::<CliScope>(args, "cli_scope")?;
+    let endpoint = opt_str(args, "endpoint");
+    let model = opt_str(args, "model");
+
+    db.with(|conn| {
+        let mut group = agent_groups::create(conn, &name, &folder)?;
+        group.agent_provider = provider;
+        group.endpoint = endpoint.map(EndpointName::new);
+        group.model = model;
+        if let Some(profile) = profile {
+            group.tool_profile = profile;
+        }
+        if let Some(scope) = scope {
+            group.cli_scope = scope;
+        }
+        agent_groups::update(conn, &group)?;
+        // Default wiring: a fresh web chat so the new agent is reachable in the UI.
+        let platform_id = crate::db::generate_id("chat");
+        let chat = messaging_groups::create(
+            conn,
+            crate::channels::web::CHANNEL_TYPE,
+            &platform_id,
+            Some(&name),
+            false,
+        )?;
+        messaging_groups::wire(conn, &chat.id, &group.id)?;
+        let mut json = group_json(&group);
+        if let Value::Object(map) = &mut json {
+            map.insert("chat".to_owned(), Value::String(chat.platform_id));
+        }
+        Ok(json)
+    })
+    .map_err(handler_error)
+}
+
+/// Lowercase, alphanumerics and single dashes — a filesystem-safe folder name.
+fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = true; // suppress a leading dash
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_owned()
 }
 
 fn groups_update(

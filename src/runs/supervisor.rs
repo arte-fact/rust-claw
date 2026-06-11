@@ -119,8 +119,11 @@ impl Supervisor {
         let workspace = self.config.groups_dir.join(&group.folder);
         {
             let workspace = workspace.clone();
-            blocking(move || std::fs::create_dir_all(&workspace).map_err(SessionStoreError::from))
-                .await?;
+            let name = group.name.clone();
+            blocking(move || {
+                scaffold_workspace(&workspace, &name).map_err(SessionStoreError::from)
+            })
+            .await?;
         }
 
         loop {
@@ -281,6 +284,23 @@ where
 }
 
 /// Stand-in prompt builder until the real XML formatter lands (M4.2).
+/// Creates a group's workspace and, on a fresh group, drops a starter `AGENT.md`
+/// so a newly created agent (M9.1) boots with a basic persona instead of none.
+fn scaffold_workspace(workspace: &std::path::Path, group_name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(workspace)?;
+    let agent_md = workspace.join("AGENT.md");
+    if !agent_md.exists() {
+        std::fs::write(
+            &agent_md,
+            format!(
+                "# {group_name}\n\nYou are {group_name}, a helpful assistant. Be concise and use \
+                 your tools when they help.\n"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn draft_prompt(batch: &[InboundMessage]) -> String {
     batch
         .iter()
@@ -341,6 +361,23 @@ mod tests {
     use crate::protocol::ids::AgentGroupId;
     use crate::session::NewInboundMessage;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn scaffold_workspace_writes_a_default_agent_md_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("newbie");
+        scaffold_workspace(&workspace, "Newbie").expect("scaffold");
+        let md = std::fs::read_to_string(workspace.join("AGENT.md")).expect("AGENT.md");
+        assert!(md.contains("Newbie"));
+
+        // An edited AGENT.md is never clobbered on the next run.
+        std::fs::write(workspace.join("AGENT.md"), "custom").expect("edit");
+        scaffold_workspace(&workspace, "Newbie").expect("re-scaffold");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("AGENT.md")).expect("read"),
+            "custom"
+        );
+    }
 
     struct Fixture {
         central: Arc<CentralDb>,

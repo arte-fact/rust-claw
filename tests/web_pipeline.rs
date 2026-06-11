@@ -212,6 +212,36 @@ async fn admin_renders_resources_and_runs_commands_as_host() {
 }
 
 #[tokio::test]
+async fn admin_creates_an_agent_with_its_own_chat() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(tmp.path().to_path_buf());
+    let app = claw::app::build(&config).await.expect("build app");
+    let client = Client::login(app.http.clone()).await;
+
+    // groups-create is approval-gated for agents, but the operator (Host) runs it directly.
+    let created = client
+        .post_form("/admin/run", "command=groups-create&name=Researcher")
+        .await;
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+
+    // The new agent comes with its own wired chat, visible in the chat list…
+    let chats = body_json(client.get("/api/chats").await).await;
+    assert!(
+        chats
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|chat| chat["name"] == "Researcher"),
+        "the new agent's chat must appear"
+    );
+    // …and the group itself in the admin table.
+    let groups = body_text(client.get("/admin/groups").await).await;
+    assert!(groups.contains("Researcher"));
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn admin_tasks_lists_and_controls_scheduled_tasks() {
     use claw::db::{CentralDb, sessions};
     use claw::session::SessionStore;

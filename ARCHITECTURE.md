@@ -586,6 +586,13 @@ field becomes a live dropdown of configured endpoints). `POST /admin/run` coerce
 HTTP (web admin), plus the in-process `admin` tool (agents, M6.4) — all under the same
 `cli_scope`/approval gates. Any command a fork registers appears in the web admin with zero UI work.
 
+**Creating agents** (`groups-create`, M9.1) is just another registry command — `Access::Approval`,
+so the operator (Host) runs it directly but an agent spawning a sub-agent is held for owner approval
+(§ M7.2). It inserts the `agent_groups` row (name → slugified folder), plus a default wiring: a fresh
+web chat so the new agent is immediately reachable in the UI. The group folder and a starter
+`AGENT.md` are scaffolded by the supervisor on the agent's first run (existing AGENT.md is never
+clobbered).
+
 The one bespoke admin view is **Tasks** (M7.3b): `/admin/tasks` scans every active session's DB
 (`list_scheduled_tasks`) and tabulates group, series, prompt, schedule, next fire (recurring →
 cron evaluator, one-shot → `process_after`), and status, with pause/resume/cancel posting to

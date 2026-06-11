@@ -319,7 +319,8 @@ fn json_string(value: &str) -> String {
 async fn fallback_path_turns_plain_text_into_a_reply() {
     let llm_base = mock_llm().await;
     let body = first_reply_body(&llm_base, "hello model").await;
-    assert_eq!(body, "model saw 1 messages, last: [you] hello model");
+    // Two messages: the scaffolded AGENT.md system prompt (M9.1) + the user turn.
+    assert_eq!(body, "model saw 2 messages, last: [you] hello model");
 }
 
 #[tokio::test]

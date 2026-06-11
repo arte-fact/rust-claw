@@ -176,8 +176,13 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M9 — Extended messaging + extensibility
 
-- [ ] **9.1 create_agent.** System action + approval → group row + folder scaffold + default
-      wiring; agent-initiated via tools. (§8.6)
+- [x] **9.1 create_agent.** `groups-create` registry command (`Access::Approval`): inserts the
+      `agent_groups` row (name → slugified folder, optional provider/endpoint/model/profile/scope) +
+      a default wiring (a fresh web chat so the agent is reachable). Operator (Host) runs it directly;
+      an agent spawning a sub-agent is held for owner approval (reuses M7.2) and reaches it via the
+      M6.4 `admin` tool. The folder + a starter `AGENT.md` are scaffolded by the supervisor on first
+      run (never clobbering an edited one). Tests: Host creates row+chat+wiring, agent path is held,
+      scaffold writes/keeps AGENT.md, and an HTTP test (admin creates an agent → its chat appears). (§8.6)
 - [ ] **9.2 Multi-chat UI.** Multiple web chats (create/archive), per-thread sessions surfaced in
       the UI, accumulate (`trigger=0`) policy support end-to-end. Visual verification: snapshot
       the chat list + thread views.

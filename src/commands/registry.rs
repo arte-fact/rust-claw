@@ -390,4 +390,55 @@ mod tests {
         assert!(response.ok, "{:?}", response.error);
         assert!(!endpoint_exists(&central), "the approved delete must run");
     }
+
+    #[tokio::test]
+    async fn host_creates_a_group_with_a_wired_chat() {
+        use crate::db::messaging_groups;
+        let central = Arc::new(CentralDb::open_in_memory().expect("open"));
+        let registry = Registry::new(central.clone());
+        let response = registry
+            .dispatch(
+                request("groups-create", &[("name", "Researcher Bot")]),
+                CallerContext::Host,
+            )
+            .await;
+        assert!(response.ok, "{:?}", response.error);
+
+        central
+            .with(|conn| {
+                let group = agent_groups::list(conn)?
+                    .into_iter()
+                    .find(|group| group.name == "Researcher Bot")
+                    .expect("group created");
+                assert_eq!(group.folder, "researcher-bot", "name is slugified");
+                let chat = messaging_groups::list(conn)?
+                    .into_iter()
+                    .find(|chat| chat.name.as_deref() == Some("Researcher Bot"))
+                    .expect("chat created");
+                let wirings = messaging_groups::wirings_for(conn, &chat.id)?;
+                assert_eq!(wirings.len(), 1);
+                assert_eq!(wirings[0].agent_group_id, group.id);
+                Ok(())
+            })
+            .expect("assert");
+    }
+
+    #[tokio::test]
+    async fn agent_group_creation_is_held_for_approval() {
+        let (central, registry, group_id) = global_group_with_endpoint();
+        let response = registry
+            .dispatch(
+                request("groups-create", &[("name", "Spawn")]),
+                agent_caller(&group_id),
+            )
+            .await;
+        assert_eq!(
+            response.error.expect("held").code,
+            ErrorCode::ApprovalPending
+        );
+        let count = central
+            .with(|conn| Ok(agent_groups::list(conn)?.len()))
+            .expect("list");
+        assert_eq!(count, 1, "creation was held, not executed");
+    }
 }
