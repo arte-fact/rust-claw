@@ -96,6 +96,52 @@ async fn mock_llm_send_message_tool() -> String {
     format!("http://{addr}/v1")
 }
 
+/// Mock for the schedule→fire→reply lifecycle. When the conversation already
+/// contains the fired task ("[scheduled task]"), it replies with the reminder.
+/// Otherwise it schedules an immediately-due task, then acknowledges.
+async fn mock_llm_scheduler() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            let messages = body["messages"].as_array().cloned().unwrap_or_default();
+            let task_fired = messages.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("[scheduled task]"))
+            });
+            let called_tool = messages.iter().any(|m| m["role"] == "tool");
+
+            let response = if task_fired {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "reminder: drink water"
+                }}]})
+            } else if called_tool {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "scheduled it"
+                }}]})
+            } else {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": Value::Null,
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {
+                        "name": "schedule_task",
+                        "arguments": "{\"prompt\":\"drink water\",\"process_after\":\"2020-01-01T00:00:00.000Z\"}"
+                    }}]
+                }}]})
+            };
+            Json(response)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{addr}/v1")
+}
+
 /// Mock that drives a coder turn: `bash` first (no tool role yet), then `edit`
 /// once the bash result is back, then a plain reply — proving multi-round tool
 /// use with bash + a file edit in one turn.
@@ -281,6 +327,90 @@ async fn tool_call_path_sends_a_message_via_the_send_message_tool() {
     let llm_base = mock_llm_send_message_tool().await;
     let body = first_reply_body(&llm_base, "say hi").await;
     assert_eq!(body, "hi from a tool call");
+}
+
+/// Schedule a due task → the drain loop fires it in the same run → the agent
+/// replies to the fired task. Proves the full schedule→fire→reply lifecycle
+/// without waiting on the 60s sweep (the task is already due).
+#[tokio::test]
+async fn scheduled_task_fires_and_the_agent_replies() {
+    let llm_base = mock_llm_scheduler().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: PathBuf::from(tmp.path()),
+        port: 0,
+        auth_token: Some(TOKEN.to_owned()),
+        timezone: "UTC".to_owned(),
+        default_endpoint: None,
+        default_model: None,
+    };
+    seed_native_group(&config, &llm_base);
+
+    let app = claw::app::build(&config).await.expect("build app");
+    let cookie = login(&app.http).await;
+    let request = |req: Request<Body>| {
+        let app = app.http.clone();
+        async move { app.oneshot(req).await.expect("response") }
+    };
+
+    let chat_id = body_json(
+        request(
+            Request::post("/api/chats")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Main"}"#))
+                .expect("request"),
+        )
+        .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("platform_id")
+        .to_owned();
+
+    request(
+        Request::post(format!("/api/chats/{chat_id}/messages"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"remind me to drink water"}"#))
+            .expect("request"),
+    )
+    .await;
+
+    // Poll until both the acknowledgement and the fired-task reminder have landed.
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..100 {
+        let response = request(
+            Request::get(format!("/api/chats/{chat_id}/messages"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        bodies = body_json(response)
+            .await
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter(|m| m["direction"] == "out")
+            .filter_map(|m| m["body"].as_str().map(str::to_owned))
+            .collect();
+        if bodies.iter().any(|b| b.contains("reminder: drink water")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        bodies.iter().any(|b| b == "scheduled it"),
+        "acknowledgement expected, got {bodies:?}"
+    );
+    assert!(
+        bodies.iter().any(|b| b == "reminder: drink water"),
+        "fired-task reminder expected, got {bodies:?}"
+    );
+
+    app.shutdown().await;
 }
 
 #[tokio::test]

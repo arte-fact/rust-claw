@@ -91,7 +91,7 @@ folder — see CLAUDE.md §"UI verification".**
 
 - [x] **5.1 Sweep.** 60s task: due `process_after` → enqueue, due `deliver_after` → deliver,
       recurrence advance (in-house jiff cron, grid-aligned, `series_id`). Time-injected tests. (§10)
-- [ ] **5.2 Task lifecycle.** `schedule_task` system action → `messages_in` insert;
+- [x] **5.2 Task lifecycle.** `schedule_task` system action → `messages_in` insert;
       list/cancel/pause/resume/update actions; task formatting (`<task>`, pre-script,
       `wake_agent=false`). End-to-end schedule-fire-reply test. (§8.6)
 - [ ] **5.3 Watchdog + recovery.** No-event watchdog (pure decision fn + kill), retry backoff

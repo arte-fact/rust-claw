@@ -1,11 +1,13 @@
 mod inbound;
 mod outbound;
 mod routing;
+mod scheduling;
 mod transcript;
 
 pub use inbound::{InboundMessage, NewInboundMessage};
 pub use outbound::{NewOutboundMessage, OutboundMessage};
 pub use routing::Destination;
+pub use scheduling::ScheduledTask;
 pub use transcript::TranscriptEntry;
 
 use std::path::{Path, PathBuf};

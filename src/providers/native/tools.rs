@@ -6,7 +6,6 @@ use serde_json::json;
 
 use crate::protocol::content::{OutboundContent, Routing};
 use crate::protocol::entities::ToolProfile;
-use crate::protocol::message::MessageKind;
 use crate::session::{NewOutboundMessage, SessionDb};
 
 use super::client::{ToolCall, ToolDefinition};
@@ -14,6 +13,10 @@ use super::{exec, files};
 
 pub const SEND_MESSAGE: &str = "send_message";
 pub const SCHEDULE_TASK: &str = "schedule_task";
+pub const LIST_TASKS: &str = "list_tasks";
+pub const CANCEL_TASK: &str = "cancel_task";
+pub const PAUSE_TASK: &str = "pause_task";
+pub const RESUME_TASK: &str = "resume_task";
 pub const SEND_TO_AGENT: &str = "send_to_agent";
 pub const ASK_USER_QUESTION: &str = "ask_user_question";
 pub const BASH: &str = "bash";
@@ -107,7 +110,7 @@ fn messaging_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::function(
             SCHEDULE_TASK,
-            "Schedule a prompt to run later, optionally on a recurring cron schedule.",
+            "Schedule a prompt to run later, optionally on a recurring cron schedule. Returns a series id.",
             json!({
                 "type": "object",
                 "properties": {
@@ -118,10 +121,42 @@ fn messaging_definitions() -> Vec<ToolDefinition> {
                     },
                     "recurrence": {
                         "type": "string",
-                        "description": "Cron expression for recurring runs. Omit for a one-shot task."
+                        "description": "Cron expression (5 fields) for recurring runs. Omit for a one-shot task."
                     }
                 },
                 "required": ["prompt"]
+            }),
+        ),
+        ToolDefinition::function(
+            LIST_TASKS,
+            "List the active (pending or paused) scheduled tasks with their series ids.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        ToolDefinition::function(
+            CANCEL_TASK,
+            "Cancel a scheduled task by its series id.",
+            json!({
+                "type": "object",
+                "properties": { "series": { "type": "string" } },
+                "required": ["series"]
+            }),
+        ),
+        ToolDefinition::function(
+            PAUSE_TASK,
+            "Pause a scheduled task by its series id (stops it firing until resumed).",
+            json!({
+                "type": "object",
+                "properties": { "series": { "type": "string" } },
+                "required": ["series"]
+            }),
+        ),
+        ToolDefinition::function(
+            RESUME_TASK,
+            "Resume a paused scheduled task by its series id.",
+            json!({
+                "type": "object",
+                "properties": { "series": { "type": "string" } },
+                "required": ["series"]
             }),
         ),
         ToolDefinition::function(
@@ -247,6 +282,10 @@ fn dispatch_messaging(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
     match call.function.name.as_str() {
         SEND_MESSAGE => send_message(db, &call.function.arguments),
         SCHEDULE_TASK => schedule_task(db, &call.function.arguments),
+        LIST_TASKS => list_tasks(db),
+        CANCEL_TASK => task_action(db, &call.function.arguments, TaskAction::Cancel),
+        PAUSE_TASK => task_action(db, &call.function.arguments, TaskAction::Pause),
+        RESUME_TASK => task_action(db, &call.function.arguments, TaskAction::Resume),
         SEND_TO_AGENT => send_to_agent(db, &call.function.arguments),
         ASK_USER_QUESTION => {
             ToolOutcome::note("ask_user_question is not available yet; ask in a normal message.")
@@ -307,14 +346,70 @@ fn schedule_task(db: &SessionDb, arguments: &str) -> ToolOutcome {
         Ok(args) => args,
         Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
     };
-    let payload = json!({
-        "action": "schedule_task",
-        "prompt": args.prompt,
-        "process_after": args.process_after,
-        "recurrence": args.recurrence,
-    });
-    match write_system(db, &payload) {
-        Ok(()) => ToolOutcome::note("scheduled"),
+    if let Some(recurrence) = &args.recurrence
+        && let Err(err) = crate::cron::Cron::parse(recurrence)
+    {
+        return ToolOutcome::note(format!("error: {err}"));
+    }
+    match db.schedule_task(
+        &args.prompt,
+        args.process_after.as_deref(),
+        args.recurrence.as_deref(),
+    ) {
+        Ok(series) => ToolOutcome::note(format!("scheduled (series {series})")),
+        Err(err) => ToolOutcome::note(format!("error: {err}")),
+    }
+}
+
+fn list_tasks(db: &SessionDb) -> ToolOutcome {
+    match db.list_scheduled_tasks() {
+        Ok(tasks) if tasks.is_empty() => ToolOutcome::note("no scheduled tasks"),
+        Ok(tasks) => {
+            let lines: Vec<String> = tasks
+                .iter()
+                .map(|task| {
+                    let schedule = match (&task.recurrence, &task.process_after) {
+                        (Some(cron), _) => format!("recurring [{cron}]"),
+                        (None, Some(at)) => format!("once at {at}"),
+                        (None, None) => "as soon as possible".to_owned(),
+                    };
+                    let paused = if task.paused { " (paused)" } else { "" };
+                    format!(
+                        "- {} — {} — {}{}",
+                        task.series, task.prompt, schedule, paused
+                    )
+                })
+                .collect();
+            ToolOutcome::note(lines.join("\n"))
+        }
+        Err(err) => ToolOutcome::note(format!("error: {err}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct SeriesArgs {
+    series: String,
+}
+
+enum TaskAction {
+    Cancel,
+    Pause,
+    Resume,
+}
+
+fn task_action(db: &SessionDb, arguments: &str, action: TaskAction) -> ToolOutcome {
+    let args: SeriesArgs = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    let result = match action {
+        TaskAction::Cancel => db.cancel_task(&args.series),
+        TaskAction::Pause => db.set_task_paused(&args.series, true),
+        TaskAction::Resume => db.set_task_paused(&args.series, false),
+    };
+    match result {
+        Ok(0) => ToolOutcome::note(format!("no active task with series {}", args.series)),
+        Ok(_) => ToolOutcome::note("done"),
         Err(err) => ToolOutcome::note(format!("error: {err}")),
     }
 }
@@ -344,15 +439,6 @@ fn send_to_agent(db: &SessionDb, arguments: &str) -> ToolOutcome {
         Ok(_) => ToolOutcome::note("delivered to agent"),
         Err(err) => ToolOutcome::note(format!("error: {err}")),
     }
-}
-
-fn write_system(db: &SessionDb, payload: &serde_json::Value) -> Result<(), String> {
-    let body = serde_json::to_string(payload).map_err(|err| err.to_string())?;
-    let mut message = NewOutboundMessage::chat(body, Routing::default());
-    message.kind = MessageKind::System;
-    db.write_outbound(&message)
-        .map(|_| ())
-        .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -459,9 +545,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schedule_task_writes_a_system_row_without_claiming_a_reply() {
+    async fn schedule_task_creates_a_listable_task_and_lifecycle_works() {
         let (_tmp, db, context) = fixture(ToolProfile::Chat);
-        let outcome = dispatch(
+        let scheduled = dispatch(
             &db,
             &context,
             &call(
@@ -470,14 +556,61 @@ mod tests {
             ),
         )
         .await;
-        assert!(!outcome.produced_message);
+        assert!(!scheduled.produced_message);
+        assert!(scheduled.result.starts_with("scheduled (series task-"));
 
-        let now = db.now_timestamp().expect("now");
-        let due = db.due_outbound(&now).expect("due");
-        assert_eq!(due[0].kind, "system");
-        let payload: serde_json::Value = serde_json::from_str(&due[0].content).expect("json");
-        assert_eq!(payload["action"], "schedule_task");
-        assert_eq!(payload["recurrence"], "0 9 * * *");
+        let listed = dispatch(&db, &context, &call(LIST_TASKS, "{}")).await;
+        assert!(listed.result.contains("daily briefing"));
+        assert!(listed.result.contains("recurring [0 9 * * *]"));
+
+        let series = db.list_scheduled_tasks().expect("list")[0].series.clone();
+        let series_args = format!(r#"{{"series":"{series}"}}"#);
+
+        assert_eq!(
+            dispatch(&db, &context, &call(PAUSE_TASK, &series_args))
+                .await
+                .result,
+            "done"
+        );
+        assert!(db.list_scheduled_tasks().expect("list")[0].paused);
+
+        assert_eq!(
+            dispatch(&db, &context, &call(CANCEL_TASK, &series_args))
+                .await
+                .result,
+            "done"
+        );
+        assert!(
+            dispatch(&db, &context, &call(LIST_TASKS, "{}"))
+                .await
+                .result
+                .contains("no scheduled tasks")
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_task_rejects_a_bad_cron() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(
+            &db,
+            &context,
+            &call(SCHEDULE_TASK, r#"{"prompt":"x","recurrence":"not a cron"}"#),
+        )
+        .await;
+        assert!(outcome.result.starts_with("error:"));
+        assert!(db.list_scheduled_tasks().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_of_unknown_series_is_reported() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(
+            &db,
+            &context,
+            &call(CANCEL_TASK, r#"{"series":"task-nope"}"#),
+        )
+        .await;
+        assert!(outcome.result.contains("no active task"));
     }
 
     #[tokio::test]
