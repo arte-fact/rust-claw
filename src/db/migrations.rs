@@ -19,6 +19,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "002-web-messages",
         up: web_messages,
     },
+    Migration {
+        version: 3,
+        name: "003-tool-profile",
+        up: tool_profile,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -188,6 +193,12 @@ fn web_messages(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+fn tool_profile(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "ALTER TABLE agent_groups ADD COLUMN tool_profile TEXT NOT NULL DEFAULT 'chat';",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +219,8 @@ mod tests {
             applied,
             vec![
                 (1, "001-initial".to_owned()),
-                (2, "002-web-messages".to_owned())
+                (2, "002-web-messages".to_owned()),
+                (3, "003-tool-profile".to_owned()),
             ]
         );
     }

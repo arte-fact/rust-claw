@@ -53,6 +53,7 @@ mod tests {
             model: None,
             system_context: None,
             inference: None,
+            tool_profile: crate::protocol::entities::ToolProfile::Chat,
         }
     }
 

@@ -1,20 +1,51 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::protocol::content::{OutboundContent, Routing};
+use crate::protocol::entities::ToolProfile;
 use crate::protocol::message::MessageKind;
 use crate::session::{NewOutboundMessage, SessionDb};
 
 use super::client::{ToolCall, ToolDefinition};
+use super::exec;
 
 pub const SEND_MESSAGE: &str = "send_message";
 pub const SCHEDULE_TASK: &str = "schedule_task";
 pub const SEND_TO_AGENT: &str = "send_to_agent";
 pub const ASK_USER_QUESTION: &str = "ask_user_question";
+pub const BASH: &str = "bash";
 
-/// Messaging-only tool surface for the native agent (§8.5). No bash/filesystem.
+/// What a tool call may touch: the group workspace, gated by the group's profile.
+#[derive(Debug, Clone)]
+pub struct ToolContext {
+    pub workspace: PathBuf,
+    pub profile: ToolProfile,
+}
+
+/// Tool surface per profile (§8.5): messaging for everyone; bash/files for coders.
 #[must_use]
-pub fn definitions() -> Vec<ToolDefinition> {
+pub fn definitions(profile: ToolProfile) -> Vec<ToolDefinition> {
+    let mut tools = messaging_definitions();
+    if profile == ToolProfile::Coder {
+        tools.push(ToolDefinition::function(
+            BASH,
+            "Run a bash command in the agent workspace. Returns exit code and output.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The shell command to run." }
+                },
+                "required": ["command"]
+            }),
+        ));
+    }
+    tools
+}
+
+fn messaging_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::function(
             SEND_MESSAGE,
@@ -96,9 +127,23 @@ impl ToolOutcome {
     }
 }
 
-/// Executes a tool call against the session DB. Tool errors become result
-/// strings (fed back to the model) rather than failing the whole turn.
-pub fn dispatch(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
+/// Executes a tool call. Tool errors become result strings (fed back to the
+/// model) rather than failing the whole turn. Profile gating is enforced here
+/// too — a model hallucinating `bash` in a chat group gets a refusal result.
+pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCall) -> ToolOutcome {
+    match call.function.name.as_str() {
+        BASH => bash(context, &call.function.arguments).await,
+        _ => {
+            let db = db.clone();
+            let call = call.clone();
+            tokio::task::spawn_blocking(move || dispatch_messaging(&db, &call))
+                .await
+                .unwrap_or_else(|err| ToolOutcome::note(format!("error: tool task failed: {err}")))
+        }
+    }
+}
+
+fn dispatch_messaging(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
     match call.function.name.as_str() {
         SEND_MESSAGE => send_message(db, &call.function.arguments),
         SCHEDULE_TASK => schedule_task(db, &call.function.arguments),
@@ -108,6 +153,22 @@ pub fn dispatch(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
         }
         other => ToolOutcome::note(format!("error: unknown tool {other}")),
     }
+}
+
+#[derive(Deserialize)]
+struct BashArgs {
+    command: String,
+}
+
+async fn bash(context: &ToolContext, arguments: &str) -> ToolOutcome {
+    if context.profile != ToolProfile::Coder {
+        return ToolOutcome::note("error: bash is not available in this agent group");
+    }
+    let args: BashArgs = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    ToolOutcome::note(exec::bash(&context.workspace, &args.command).await)
 }
 
 /// Writes a plain reply directly — the no-tool-call fallback path.
@@ -214,10 +275,34 @@ mod tests {
         }
     }
 
+    fn fixture(profile: ToolProfile) -> (tempfile::TempDir, Arc<SessionDb>, ToolContext) {
+        let (tmp, db) = test_session_db();
+        let context = ToolContext {
+            workspace: tmp.path().to_path_buf(),
+            profile,
+        };
+        (tmp, Arc::new(db), context)
+    }
+
     #[test]
-    fn send_message_writes_an_outbound_chat_row() {
-        let (_tmp, db) = test_session_db();
-        let outcome = dispatch(&db, &call(SEND_MESSAGE, r#"{"text":"hello"}"#));
+    fn coder_profile_adds_bash_to_the_chat_surface() {
+        let chat: Vec<&str> = definitions(ToolProfile::Chat)
+            .iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        let coder: Vec<&str> = definitions(ToolProfile::Coder)
+            .iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert!(!chat.contains(&BASH));
+        assert!(coder.contains(&BASH));
+        assert!(coder.contains(&SEND_MESSAGE), "messaging tools stay");
+    }
+
+    #[tokio::test]
+    async fn send_message_writes_an_outbound_chat_row() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(&db, &context, &call(SEND_MESSAGE, r#"{"text":"hello"}"#)).await;
         assert!(outcome.produced_message);
 
         let now = db.now_timestamp().expect("now");
@@ -228,16 +313,18 @@ mod tests {
         assert_eq!(due[0].kind, "chat");
     }
 
-    #[test]
-    fn schedule_task_writes_a_system_row_without_claiming_a_reply() {
-        let (_tmp, db) = test_session_db();
+    #[tokio::test]
+    async fn schedule_task_writes_a_system_row_without_claiming_a_reply() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
         let outcome = dispatch(
             &db,
+            &context,
             &call(
                 SCHEDULE_TASK,
                 r#"{"prompt":"daily briefing","recurrence":"0 9 * * *"}"#,
             ),
-        );
+        )
+        .await;
         assert!(!outcome.produced_message);
 
         let now = db.now_timestamp().expect("now");
@@ -248,44 +335,66 @@ mod tests {
         assert_eq!(payload["recurrence"], "0 9 * * *");
     }
 
-    #[test]
-    fn send_to_agent_routes_to_the_agent_channel() {
-        let (_tmp, db) = test_session_db();
+    #[tokio::test]
+    async fn send_to_agent_routes_to_the_agent_channel() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
         dispatch(
             &db,
+            &context,
             &call(
                 SEND_TO_AGENT,
                 r#"{"agent_group":"ag-coder","text":"review this"}"#,
             ),
-        );
+        )
+        .await;
         let now = db.now_timestamp().expect("now");
         let due = db.due_outbound(&now).expect("due");
         assert_eq!(due[0].routing.channel_type.as_deref(), Some("agent"));
         assert_eq!(due[0].routing.platform_id.as_deref(), Some("ag-coder"));
     }
 
-    #[test]
-    fn bad_arguments_become_a_tool_result_not_a_panic() {
-        let (_tmp, db) = test_session_db();
-        let outcome = dispatch(&db, &call(SEND_MESSAGE, "not json"));
+    #[tokio::test]
+    async fn bash_runs_in_the_workspace_for_coder_groups() {
+        let (tmp, db, context) = fixture(ToolProfile::Coder);
+        std::fs::write(tmp.path().join("hello.txt"), "from the workspace").expect("write");
+        let outcome = dispatch(&db, &context, &call(BASH, r#"{"command":"cat hello.txt"}"#)).await;
         assert!(!outcome.produced_message);
-        assert!(outcome.result.starts_with("error:"));
+        assert_eq!(outcome.result, "exit code: 0\nfrom the workspace");
     }
 
-    #[test]
-    fn unknown_tool_is_reported_back() {
-        let (_tmp, db) = test_session_db();
-        let outcome = dispatch(&db, &call("delete_everything", "{}"));
+    #[tokio::test]
+    async fn bash_is_refused_for_chat_groups() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(&db, &context, &call(BASH, r#"{"command":"echo hi"}"#)).await;
+        assert!(outcome.result.contains("not available"));
+    }
+
+    #[tokio::test]
+    async fn bad_arguments_become_a_tool_result_not_a_panic() {
+        let (_tmp, db, context) = fixture(ToolProfile::Coder);
+        for name in [SEND_MESSAGE, BASH] {
+            let outcome = dispatch(&db, &context, &call(name, "not json")).await;
+            assert!(!outcome.produced_message);
+            assert!(outcome.result.contains("error:"), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_reported_back() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(&db, &context, &call("delete_everything", "{}")).await;
         assert!(outcome.result.contains("unknown tool"));
     }
 
-    #[test]
-    fn ask_user_question_is_a_placeholder_for_now() {
-        let (_tmp, db) = test_session_db();
+    #[tokio::test]
+    async fn ask_user_question_is_a_placeholder_for_now() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
         let outcome = dispatch(
             &db,
+            &context,
             &call(ASK_USER_QUESTION, r#"{"question":"?","options":[]}"#),
-        );
+        )
+        .await;
         assert!(!outcome.produced_message);
         assert!(outcome.result.contains("not available yet"));
     }

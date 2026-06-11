@@ -76,7 +76,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **4.4 Remove pi & TypeScript.** Delete `src/providers/pi`, `pi-extension/`, the Node CI
       job, the `Pi` enum variant, the session `pi/` subdir; sync ARCHITECTURE/PLAN/CLAUDE.md;
       write the decision record. Repo becomes 100 % Rust.
-- [ ] **4.5 Bash tool + tool profiles.** `bash` tool for the native loop: `tokio::process`, cwd =
+- [x] **4.5 Bash tool + tool profiles.** `bash` tool for the native loop: `tokio::process`, cwd =
       group workspace, timeout, head+tail output truncation, exit code in the result. Per-group
       `tool_profile` column (`chat` | `coder`) gating the tool surface; migration. (§8.5)
 - [ ] **4.6 File tools.** `read` (line numbers/limits), `write` (create/overwrite), `edit`

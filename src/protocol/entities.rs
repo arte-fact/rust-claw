@@ -22,6 +22,11 @@ text_enum!(AgentProviderKind {
     Echo => "echo",
 });
 
+text_enum!(ToolProfile {
+    Chat => "chat",
+    Coder => "coder",
+});
+
 text_enum!(UnknownSenderPolicy {
     Strict => "strict",
     RequestApproval => "request-approval",

@@ -1,5 +1,6 @@
 pub mod client;
 pub mod context;
+pub mod exec;
 pub mod tools;
 
 use std::path::Path;
@@ -71,7 +72,11 @@ async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnErr
     let db = open_session_db(input.session_dir.clone()).await?;
     let system_prompt = read_agent_md(&input.cwd);
     let mut messages = initial_messages(db.clone(), system_prompt).await?;
-    let tools = tools::definitions();
+    let tools = tools::definitions(input.tool_profile);
+    let tool_context = tools::ToolContext {
+        workspace: input.cwd.clone(),
+        profile: input.tool_profile,
+    };
     let mut produced_message = false;
 
     for _ in 0..MAX_TOOL_ROUNDS {
@@ -87,13 +92,10 @@ async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnErr
         messages.push(ChatMessage::assistant_tool_calls(
             completion.tool_calls.clone(),
         ));
-        let results = run_tools(db.clone(), completion.tool_calls).await?;
-        for result in results {
-            produced_message |= result.produced_message;
-            messages.push(ChatMessage::tool_result(
-                result.tool_call_id,
-                result.content,
-            ));
+        for call in &completion.tool_calls {
+            let outcome = tools::dispatch(&db, &tool_context, call).await;
+            produced_message |= outcome.produced_message;
+            messages.push(ChatMessage::tool_result(call.id.clone(), outcome.result));
         }
     }
 
@@ -119,33 +121,6 @@ async fn finish_with_fallback(
     };
     let db = db.clone();
     spawn_db(move || tools::send_text(&db, &text)).await
-}
-
-struct ToolResult {
-    tool_call_id: String,
-    content: String,
-    produced_message: bool,
-}
-
-async fn run_tools(
-    db: Arc<SessionDb>,
-    calls: Vec<client::ToolCall>,
-) -> Result<Vec<ToolResult>, TurnError> {
-    tokio::task::spawn_blocking(move || {
-        calls
-            .iter()
-            .map(|call| {
-                let outcome = tools::dispatch(&db, call);
-                ToolResult {
-                    tool_call_id: call.id.clone(),
-                    content: outcome.result,
-                    produced_message: outcome.produced_message,
-                }
-            })
-            .collect()
-    })
-    .await
-    .map_err(|err| fatal(err.to_string()))
 }
 
 async fn open_session_db(session_dir: std::path::PathBuf) -> Result<Arc<SessionDb>, TurnError> {

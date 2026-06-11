@@ -139,6 +139,7 @@ impl Supervisor {
                 model: group.model.clone(),
                 system_context: None,
                 inference: inference.clone(),
+                tool_profile: group.tool_profile,
             })?;
 
             match consume_run(run).await {

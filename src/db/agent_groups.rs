@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::protocol::entities::{AgentProviderKind, CliScope};
+use crate::protocol::entities::{AgentProviderKind, CliScope, ToolProfile};
 use crate::protocol::ids::{AgentGroupId, EndpointName};
 
 use super::generate_id;
@@ -15,6 +15,7 @@ pub struct AgentGroup {
     pub model: Option<String>,
     pub thinking_level: Option<String>,
     pub cli_scope: CliScope,
+    pub tool_profile: ToolProfile,
     pub created_at: String,
 }
 
@@ -47,7 +48,7 @@ pub fn update(conn: &Connection, group: &AgentGroup) -> Result<bool, rusqlite::E
     let changed = conn.execute(
         "UPDATE agent_groups
          SET name = ?2, folder = ?3, agent_provider = ?4, endpoint = ?5,
-             model = ?6, thinking_level = ?7, cli_scope = ?8
+             model = ?6, thinking_level = ?7, cli_scope = ?8, tool_profile = ?9
          WHERE id = ?1",
         params![
             group.id,
@@ -58,6 +59,7 @@ pub fn update(conn: &Connection, group: &AgentGroup) -> Result<bool, rusqlite::E
             group.model,
             group.thinking_level,
             group.cli_scope,
+            group.tool_profile,
         ],
     )?;
     Ok(changed == 1)
@@ -69,7 +71,7 @@ pub fn delete(conn: &Connection, id: &AgentGroupId) -> Result<bool, rusqlite::Er
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, name, folder, agent_provider, endpoint, model,
-        thinking_level, cli_scope, created_at FROM agent_groups";
+        thinking_level, cli_scope, tool_profile, created_at FROM agent_groups";
 
 fn fetch_required(conn: &Connection, id: &AgentGroupId) -> Result<AgentGroup, rusqlite::Error> {
     conn.query_row(
@@ -89,7 +91,8 @@ fn from_row(row: &Row<'_>) -> Result<AgentGroup, rusqlite::Error> {
         model: row.get(5)?,
         thinking_level: row.get(6)?,
         cli_scope: row.get(7)?,
-        created_at: row.get(8)?,
+        tool_profile: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -106,6 +109,7 @@ mod tests {
             assert!(created.id.as_str().starts_with("ag-"));
             assert_eq!(created.cli_scope, CliScope::Group);
             assert_eq!(created.agent_provider, None);
+            assert_eq!(created.tool_profile, ToolProfile::Chat);
 
             let fetched = get(conn, &created.id)?.expect("must exist");
             assert_eq!(fetched, created);
@@ -129,6 +133,7 @@ mod tests {
             group.endpoint = Some(EndpointName::new("local"));
             group.model = Some("qwen3.6-dense".to_owned());
             group.cli_scope = CliScope::Global;
+            group.tool_profile = ToolProfile::Coder;
             assert!(update(conn, &group)?);
 
             let fetched = get(conn, &group.id)?.expect("must exist");
@@ -136,6 +141,7 @@ mod tests {
             assert_eq!(fetched.endpoint, Some(EndpointName::new("local")));
             assert_eq!(fetched.model.as_deref(), Some("qwen3.6-dense"));
             assert_eq!(fetched.cli_scope, CliScope::Global);
+            assert_eq!(fetched.tool_profile, ToolProfile::Coder);
             Ok(())
         })
         .expect("db ops");

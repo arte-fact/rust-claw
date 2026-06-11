@@ -27,6 +27,8 @@ pub struct QueryInput {
     pub system_context: Option<String>,
     /// Resolved endpoint+model+key — required by the native provider.
     pub inference: Option<resolution::ResolvedInference>,
+    /// Which tool surface the agent gets (§8.5).
+    pub tool_profile: crate::protocol::entities::ToolProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
