@@ -1,0 +1,14 @@
+# Keep the build context small and the layer cache stable.
+/target
+/screenshots
+/.git
+/.github
+/.playwright-mcp
+**/*.md
+docs/
+justfile
+.gitignore
+.dockerignore
+Dockerfile
+compose.yaml
+scripts/

@@ -158,9 +158,13 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M8 — Packaging
 
-- [ ] **8.1 Image + compose.** Multi-stage Dockerfile (rust builder → debian-slim + binary +
-      CA certs; no Node), compose file with `/data` volume + env, first-run token
-      generation/printout, `/data` bootstrap. Container smoke script. (§2)
+- [x] **8.1 Image + compose.** Multi-stage `Dockerfile` (rust:1.96 builder with `build-essential`
+      for rusqlite's bundled SQLite → debian-slim + binary + CA certs + bash/git/curl; no Node), with
+      a dep-cache layer (`touch` busts cargo's mtime fingerprint after COPY). `compose.yaml` with the
+      `/data` volume + env. First-run token: `resolve_auth_token` persists a generated token to
+      `/data/auth_token` (0600) and logs it, reused across restarts; an explicit `CLAW_AUTH_TOKEN`
+      wins and isn't written. `/data` bootstrap via the logs/dir creation on boot. `scripts/smoke.sh`
+      builds + boots the image and asserts healthz + the auth gate — **passes**. (§2)
 - [ ] **8.2 Ops polish.** Migrations-on-boot upgrade path, engage modes in router (pattern/
       mention/mention-sticky — moved here from M2's always-engage), README quickstart, backup notes.
 

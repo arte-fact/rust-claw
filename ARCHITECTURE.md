@@ -51,11 +51,14 @@ Three deliberate departures from upstream, decided up front:
 One image, one container, one volume:
 
 ```
-docker-compose.yml        # claw service, port 8080, volume claw-data:/data
-Dockerfile                # multi-stage: rust builder → debian-slim + /claw binary + CA certs.
-                          # No Node, no external agent — one static-ish binary.
+compose.yaml              # claw service, port 8080, volume claw-data:/data
+Dockerfile                # multi-stage: rust:1.96 builder (build-essential for rusqlite's
+                          # bundled SQLite) → debian-slim + /claw binary + CA certs + bash/git/curl
+                          # (the coder tool surface). No Node — one binary (decision 001).
+scripts/smoke.sh          # build + boot the image, assert healthz + the auth gate
 /data/                    # the persistent world — everything lives here
   central.db              # entities, routing, web message ledger
+  auth_token              # generated login token (0600), reused across restarts
   sessions/<group>/<id>/  # session.db + inbox/ + outbox/
   groups/<folder>/        # per-agent-group filesystem: AGENT.md, working files (= agent cwd)
   logs/
@@ -64,6 +67,9 @@ Dockerfile                # multi-stage: rust builder → debian-slim + /claw bi
 
 The app is stateless outside `/data`. Upgrading = new image + same volume. Inference API keys are
 plain env vars on the container or rows in the `endpoints` table (§8.7) — no credential proxy.
+**First run** (M8.1): with no `CLAW_AUTH_TOKEN`, the daemon generates a token, persists it to
+`/data/auth_token`, and logs it once (`docker compose logs claw`); an explicit env token always
+wins and is never written to disk.
 
 ---
 

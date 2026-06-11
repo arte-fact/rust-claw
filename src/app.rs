@@ -28,6 +28,8 @@ pub enum AppError {
     Db(#[from] DbError),
     #[error(transparent)]
     Session(#[from] SessionStoreError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -119,7 +121,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     }
 
     let state = WebState {
-        auth: Arc::new(AuthState::from_configured_token(config.auth_token.clone())),
+        auth: Arc::new(AuthState::new(resolve_auth_token(config)?)),
         central,
         web_channel,
         hub,
@@ -141,6 +143,36 @@ where
     T: Send + 'static,
 {
     crate::blocking::run(op).await
+}
+
+/// The login token: an explicit `CLAW_AUTH_TOKEN` wins; otherwise a generated
+/// token is persisted under `data_dir/auth_token` (0600) so it survives restarts,
+/// and printed once. Containers without an env token get a stable, logged token.
+fn resolve_auth_token(config: &Config) -> Result<String, AppError> {
+    if let Some(token) = &config.auth_token {
+        return Ok(token.clone());
+    }
+    let path = config.data_dir.join("auth_token");
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        let token = contents.trim().to_owned();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    let token = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new()).to_lowercase();
+    std::fs::create_dir_all(&config.data_dir)?;
+    std::fs::write(&path, &token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    tracing::warn!(
+        token = %token,
+        path = %path.display(),
+        "CLAW_AUTH_TOKEN not set — generated and saved a login token; set CLAW_AUTH_TOKEN to override"
+    );
+    Ok(token)
 }
 
 /// First boot on an empty database: one agent group so chats have a target.
@@ -180,4 +212,40 @@ async fn recover_stuck_runs(
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_in(dir: &std::path::Path, token: Option<&str>) -> Config {
+        Config::from_lookup(|var| match var {
+            "CLAW_DATA_DIR" => Some(dir.to_string_lossy().into_owned()),
+            "CLAW_AUTH_TOKEN" => token.map(str::to_owned),
+            _ => None,
+        })
+        .expect("config")
+    }
+
+    #[test]
+    fn generated_token_persists_across_restarts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = config_in(tmp.path(), None);
+        let first = resolve_auth_token(&config).expect("first");
+        let second = resolve_auth_token(&config).expect("second");
+        assert_eq!(first, second, "the persisted token must be reused");
+        assert!(!first.is_empty());
+        assert!(config.data_dir.join("auth_token").is_file());
+    }
+
+    #[test]
+    fn explicit_token_wins_and_is_not_persisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = config_in(tmp.path(), Some("explicit"));
+        assert_eq!(resolve_auth_token(&config).expect("token"), "explicit");
+        assert!(
+            !config.data_dir.join("auth_token").exists(),
+            "an env-provided token must not be written to disk"
+        );
+    }
 }

@@ -28,17 +28,6 @@ impl AuthState {
         }
     }
 
-    /// Generates and prints a token when none is configured — first-run flow.
-    #[must_use]
-    pub fn from_configured_token(token: Option<String>) -> Self {
-        let token = token.unwrap_or_else(|| {
-            let generated = generate_secret();
-            tracing::warn!(token = %generated, "CLAW_AUTH_TOKEN not set — generated a login token for this run");
-            generated
-        });
-        Self::new(token)
-    }
-
     fn begin_session(&self) -> String {
         let session = generate_secret();
         self.active_sessions

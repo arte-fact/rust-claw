@@ -1,0 +1,24 @@
+# claw — one Rust daemon, one persistent volume.
+# First run with no CLAW_AUTH_TOKEN generates one and prints it; it is saved to
+# /data/auth_token and reused on restart. `docker compose logs claw` to find it.
+services:
+  claw:
+    build: .
+    image: claw:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - claw-data:/data
+    environment:
+      CLAW_PORT: "8080"
+      CLAW_TIMEZONE: "UTC"
+      # Set a token to skip the generated one:
+      # CLAW_AUTH_TOKEN: "change-me"
+      # Default inference target (configurable later in the web admin):
+      # CLAW_DEFAULT_ENDPOINT: "openrouter"
+      # CLAW_DEFAULT_MODEL: "google/gemma-2-9b-it"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  claw-data:
