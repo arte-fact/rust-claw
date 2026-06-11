@@ -598,10 +598,14 @@ actually check daily.
 
 These port from the first draft with containers subtracted:
 
-- **Router** (`router.rs`): unchanged logic — interceptor hook, messaging-group lookup/auto-create,
-  sender resolution, engage modes (`Pattern`/`Mention`/`MentionSticky`), access gates, command gate
-  (host-side allow/filter/deny against `user_roles`), `trigger=0` accumulation, dropped-message
-  ledger. "Wake" now means `RunQueue::enqueue`.
+- **Router** (`router.rs`): messaging-group lookup/auto-create, session resolution, and the
+  **engage decision** (`engage.rs`, M8.2): non-chat kinds and direct messages always run; group
+  chats consult the wiring's `engage_mode` — `Pattern` (case-insensitive substring for now; regex
+  is a future dep), `Mention`, `MentionSticky` (sticky session-state deferred until group channels
+  land). A non-engaging message is still written but with `trigger=0` — it **accumulates** and rides
+  along on the next engaging run instead of waking the agent. "Wake" means `RunQueue::enqueue`, done
+  only for engaging messages. Dropped (no-wiring) messages go to the `dropped_messages` ledger. (The
+  pi-era host-side command gate is N/A — the native loop has no slash commands; see M6.3.)
 - **Delivery** (`delivery.rs`): poll `messages_out` (1s while a run is live for that session, 60s
   sweep over all active sessions), filter against `delivered`, dispatch: `system` → action registry;
   `channel_type='agent'` → permission check + write into target session + enqueue; otherwise →

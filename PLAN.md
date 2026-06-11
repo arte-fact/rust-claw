@@ -165,8 +165,14 @@ folder — see CLAUDE.md §"UI verification".**
       `/data/auth_token` (0600) and logs it, reused across restarts; an explicit `CLAW_AUTH_TOKEN`
       wins and isn't written. `/data` bootstrap via the logs/dir creation on boot. `scripts/smoke.sh`
       builds + boots the image and asserts healthz + the auth gate — **passes**. (§2)
-- [ ] **8.2 Ops polish.** Migrations-on-boot upgrade path, engage modes in router (pattern/
-      mention/mention-sticky — moved here from M2's always-engage), README quickstart, backup notes.
+- [x] **8.2 Ops polish.** **Engage modes** (`engage.rs` pure decision + router wiring): non-chat &
+      DMs always run; group chats apply the wiring's `engage_mode` (`Pattern` substring / `Mention` /
+      `MentionSticky`), non-engaging messages accumulate (`trigger=0`) and ride the next run; sticky
+      session-state deferred with group channels, `Pattern` is substring until a regex dep is
+      justified. **Migrations-on-boot**: the runner already applies each missing migration
+      transactionally — added an explicit partial-upgrade test. **README** quickstart + env table +
+      **backup notes** (stop-snapshot-start the volume). Tests: 6 engage-decision cases, group-chat
+      accumulation in the router, partial-DB upgrade. (§10)
 
 ## M9 — Extended messaging + extensibility
 

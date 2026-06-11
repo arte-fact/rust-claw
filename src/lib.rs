@@ -9,6 +9,7 @@ pub mod config;
 pub mod cron;
 pub mod db;
 pub mod delivery;
+pub mod engage;
 pub mod logging;
 pub mod modules;
 pub mod protocol;

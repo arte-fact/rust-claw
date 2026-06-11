@@ -268,6 +268,60 @@ mod tests {
         );
     }
 
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            rusqlite::params![table, column],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("pragma")
+            > 0
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            rusqlite::params![table],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("sqlite_master")
+            > 0
+    }
+
+    #[test]
+    fn run_upgrades_a_partially_migrated_database() {
+        // Simulate an old volume: only the first three migrations applied.
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+             applied_at TEXT NOT NULL)",
+            [],
+        )
+        .expect("schema_version");
+        for migration in &MIGRATIONS[..3] {
+            (migration.up)(&conn).expect("apply old migration");
+            conn.execute(
+                "INSERT INTO schema_version VALUES (?1, ?2, 'old')",
+                rusqlite::params![migration.version, migration.name],
+            )
+            .expect("record");
+        }
+        assert!(!column_exists(&conn, "web_messages", "kind"), "pre-upgrade");
+        assert!(!table_exists(&conn, "pending_approvals"), "pre-upgrade");
+
+        // Boot-time runner brings it to the latest schema without redoing 1–3.
+        run(&mut conn).expect("upgrade");
+
+        let max: u32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .expect("max version");
+        assert_eq!(max, MIGRATIONS.last().expect("migrations").version);
+        assert!(column_exists(&conn, "web_messages", "kind"), "004 applied");
+        assert!(table_exists(&conn, "pending_approvals"), "005 applied");
+    }
+
     #[test]
     fn versions_are_strictly_increasing_and_unique() {
         let mut seen = std::collections::BTreeSet::new();

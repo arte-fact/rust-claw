@@ -5,8 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::blocking;
 use crate::db::{CentralDb, DbError, dropped, messaging_groups, sessions};
-use crate::protocol::content::Routing;
-use crate::protocol::entities::SessionMode;
+use crate::engage::{Engage, EngageInput, evaluate};
+use crate::protocol::content::{InboundContent, Routing};
+use crate::protocol::entities::{EngageMode, SessionMode};
 use crate::protocol::ids::SessionId;
 use crate::protocol::message::MessageKind;
 use crate::runs::queue::RunQueue;
@@ -79,7 +80,9 @@ impl Router {
         }
     }
 
-    /// Minimal routing: every wiring engages (engage modes land with M8.2).
+    /// Routes an inbound to every wired agent group: the message is always
+    /// written, but only an *engaging* message (per the wiring's `engage_mode`)
+    /// enqueues a run — others accumulate for the next run (§10).
     pub async fn route(&self, event: InboundEvent) -> Result<RouteOutcome, RouteError> {
         let targets = self.resolve_targets(&event).await?;
         if targets.is_empty() {
@@ -91,8 +94,10 @@ impl Router {
 
         let mut delivered = Vec::with_capacity(targets.len());
         for target in targets {
-            let session_id = self.deliver_to_target(&event, target).await?;
-            self.queue.enqueue(session_id.clone());
+            let (session_id, engaged) = self.deliver_to_target(&event, target).await?;
+            if engaged {
+                self.queue.enqueue(session_id.clone());
+            }
             delivered.push(session_id);
         }
         Ok(RouteOutcome::Delivered {
@@ -125,6 +130,8 @@ impl Router {
                     .map(|wiring| RouteTarget {
                         agent_group_id: wiring.agent_group_id,
                         session_mode: wiring.session_mode,
+                        engage_mode: wiring.engage_mode,
+                        engage_pattern: wiring.engage_pattern,
                         messaging_group_id: group.id.clone(),
                     })
                     .collect())
@@ -137,11 +144,11 @@ impl Router {
         &self,
         event: &InboundEvent,
         target: RouteTarget,
-    ) -> Result<SessionId, RouteError> {
+    ) -> Result<(SessionId, bool), RouteError> {
         let central = self.central.clone();
         let store = self.store.clone();
         let event = event.clone();
-        blocking::run(move || -> Result<SessionId, RouteError> {
+        blocking::run(move || -> Result<(SessionId, bool), RouteError> {
             let session_thread = match target.session_mode {
                 SessionMode::Shared => None,
                 SessionMode::PerThread => event.thread_id.clone(),
@@ -163,6 +170,7 @@ impl Router {
                 }
             })?;
 
+            let engaged = engages(&event, &target);
             let routing = Routing {
                 channel_type: Some(event.channel_type.clone()),
                 platform_id: Some(event.platform_id.clone()),
@@ -172,8 +180,9 @@ impl Router {
             db.write_routing(&routing)?;
             let mut message = NewInboundMessage::chat(event.content.clone(), routing);
             message.kind = event.kind;
+            message.trigger = engaged;
             db.write_message(&message)?;
-            Ok(session.id)
+            Ok((session.id, engaged))
         })
         .await
     }
@@ -193,9 +202,40 @@ impl Router {
     }
 }
 
+/// Applies the wiring's engage mode to an inbound message. Sticky mention state
+/// is deferred (the router passes `sticky=false`) until group channels exist —
+/// today the only channel is the web DM, which always engages.
+fn engages(event: &InboundEvent, target: &RouteTarget) -> bool {
+    let is_chat = matches!(event.kind, MessageKind::Chat);
+    let text = if is_chat {
+        chat_text(&event.kind, &event.content)
+    } else {
+        String::new()
+    };
+    let decision = evaluate(&EngageInput {
+        is_chat,
+        is_group: event.is_group,
+        is_mention: event.is_mention,
+        sticky: false,
+        mode: target.engage_mode,
+        pattern: target.engage_pattern.as_deref(),
+        text: &text,
+    });
+    matches!(decision, Engage::Run)
+}
+
+fn chat_text(kind: &MessageKind, content: &str) -> String {
+    match InboundContent::parse(kind.as_str(), content) {
+        Ok(InboundContent::Chat(chat)) => chat.text,
+        _ => String::new(),
+    }
+}
+
 struct RouteTarget {
     agent_group_id: crate::protocol::ids::AgentGroupId,
     session_mode: SessionMode,
+    engage_mode: EngageMode,
+    engage_pattern: Option<String>,
     messaging_group_id: crate::protocol::ids::MessagingGroupId,
 }
 
@@ -275,6 +315,65 @@ mod tests {
         assert_eq!(pending[0].routing.platform_id.as_deref(), Some("chat-1"));
         let routing = db.routing().expect("routing").expect("must be set");
         assert_eq!(routing.channel_type.as_deref(), Some("web"));
+    }
+
+    fn group_event(platform_id: &str, text: &str, is_mention: bool) -> InboundEvent {
+        InboundEvent {
+            is_group: true,
+            is_mention,
+            ..chat_event(platform_id, None, text)
+        }
+    }
+
+    #[tokio::test]
+    async fn group_chat_accumulates_until_mentioned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let central = Arc::new(CentralDb::open_in_memory().expect("central"));
+        let agent_group_id = central
+            .with(|conn| {
+                let group = agent_groups::create(conn, "Andy", "andy")?;
+                // is_group + default engage_mode = 'mention'.
+                let mg = messaging_groups::create(conn, "web", "room-1", None, true)?;
+                messaging_groups::wire(conn, &mg.id, &group.id)?;
+                Ok(group.id)
+            })
+            .expect("seed");
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let queue = Arc::new(RunQueue::new());
+        let router = Router::new(central, store.clone(), queue.clone());
+
+        // A non-mention message is written but must not wake the agent.
+        let RouteOutcome::Delivered { sessions } = router
+            .route(group_event("room-1", "hi all", false))
+            .await
+            .expect("route")
+        else {
+            panic!("expected delivery");
+        };
+        assert!(
+            queue.snapshot().is_empty(),
+            "a non-mention group message must not enqueue"
+        );
+        let db = store.open(&agent_group_id, &sessions[0]).expect("open");
+        let now = db.now_timestamp().expect("now");
+        let pending = db.pending_due(&now, 10).expect("due");
+        assert_eq!(pending.len(), 1);
+        assert!(
+            !pending[0].trigger,
+            "accumulated message keeps trigger=false"
+        );
+
+        // A mention engages and enqueues; the accumulated message rides along.
+        router
+            .route(group_event("room-1", "@andy deploy", true))
+            .await
+            .expect("route");
+        assert_eq!(
+            queue.snapshot().len(),
+            1,
+            "a mention must enqueue the session"
+        );
+        assert_eq!(db.pending_due(&now, 10).expect("due").len(), 2);
     }
 
     #[tokio::test]
