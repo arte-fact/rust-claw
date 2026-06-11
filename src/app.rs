@@ -79,10 +79,13 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     let router = Arc::new(Router::new(central.clone(), store.clone(), queue.clone()));
     tasks.spawn(router.run(inbound_rx, cancel.clone()));
 
+    let commands = Arc::new(crate::commands::Registry::new(central.clone()));
+
     let supervisor = Arc::new(Supervisor::new(
         central.clone(),
         store.clone(),
         queue.clone(),
+        commands.clone(),
         crate::runs::supervisor::RunConfig {
             groups_dir: config.groups_dir(),
             default_endpoint: config.default_endpoint.clone(),
@@ -102,10 +105,9 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
     ));
     tasks.spawn(sweep.run(cancel.clone()));
 
-    let registry = Arc::new(crate::commands::Registry::new(central.clone()));
     let cli_server = Arc::new(crate::cli_server::CliServer::new(
         config.socket_path(),
-        registry,
+        commands,
     ));
     {
         let cancel = cancel.clone();

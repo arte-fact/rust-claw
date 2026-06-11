@@ -586,3 +586,121 @@ async fn coder_group_against_a_real_endpoint() {
 
     app.shutdown().await;
 }
+
+/// Mock that drives an admin-command turn: an `admin` tool call updating the
+/// agent's own group model (no `id` — the group `cli_scope` auto-fills it), then
+/// a plain reply once the command result is back.
+async fn mock_llm_admin() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            let called_tool = body["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
+            let response = if called_tool {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "updated my model"
+                }}]})
+            } else {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": Value::Null,
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {
+                        "name": "admin",
+                        "arguments": "{\"command\":\"groups-update\",\"args\":{\"model\":\"swapped-by-agent\"}}"
+                    }}]
+                }}]})
+            };
+            Json(response)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{addr}/v1")
+}
+
+/// Full chain: supervisor hands the run admin access (group `cli_scope`), the
+/// native loop calls the `admin` tool, the dispatcher executes `groups-update`
+/// as the agent (own-group auto-filled, M6.3), and the model is changed in the DB.
+#[tokio::test]
+async fn agent_runs_an_admin_command_through_the_dispatcher() {
+    let llm_base = mock_llm_admin().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: PathBuf::from(tmp.path()),
+        port: 0,
+        auth_token: Some(TOKEN.to_owned()),
+        timezone: "UTC".to_owned(),
+        default_endpoint: None,
+        default_model: None,
+    };
+    seed_native_group(&config, &llm_base);
+
+    let app = claw::app::build(&config).await.expect("build app");
+    let cookie = login(&app.http).await;
+    let request = |req: Request<Body>| {
+        let app = app.http.clone();
+        async move { app.oneshot(req).await.expect("response") }
+    };
+
+    let chat_id = body_json(
+        request(
+            Request::post("/api/chats")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Main"}"#))
+                .expect("request"),
+        )
+        .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("platform_id")
+        .to_owned();
+
+    request(
+        Request::post(format!("/api/chats/{chat_id}/messages"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"switch your model"}"#))
+            .expect("request"),
+    )
+    .await;
+
+    let mut replied = false;
+    for _ in 0..100 {
+        let response = request(
+            Request::get(format!("/api/chats/{chat_id}/messages"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let transcript = body_json(response).await.as_array().expect("array").clone();
+        if transcript.iter().any(|m| m["direction"] == "out") {
+            replied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        replied,
+        "the agent must reply after running the admin command"
+    );
+
+    app.shutdown().await;
+
+    let central = CentralDb::open(&config.central_db_path()).expect("central");
+    let model = central
+        .with(|conn| Ok(agent_groups::list(conn)?.remove(0).model))
+        .expect("group");
+    assert_eq!(
+        model.as_deref(),
+        Some("swapped-by-agent"),
+        "the admin command must have changed the group model through the full chain"
+    );
+}

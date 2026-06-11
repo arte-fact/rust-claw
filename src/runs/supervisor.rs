@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::commands::{CallerContext, Dispatcher};
 use crate::db::{CentralDb, DbError, agent_groups, sessions};
 use crate::protocol::content::{InboundContent, OutboundContent, Routing};
-use crate::protocol::entities::AgentProviderKind;
+use crate::protocol::entities::{AgentProviderKind, CliScope};
 use crate::protocol::ids::SessionId;
 use crate::protocol::message::MessageStatus;
 use crate::providers::{
-    ActiveRun, AgentProvider, ProviderError, ProviderEvent, QueryInput, create_provider,
+    ActiveRun, AgentAdmin, AgentProvider, ProviderError, ProviderEvent, QueryInput, create_provider,
 };
 use crate::session::{
     InboundMessage, NewOutboundMessage, SessionDb, SessionStore, SessionStoreError,
@@ -47,6 +48,7 @@ pub struct Supervisor {
     central: Arc<CentralDb>,
     store: Arc<SessionStore>,
     queue: Arc<RunQueue>,
+    dispatcher: Arc<dyn Dispatcher>,
     config: RunConfig,
     factory: ProviderFactory,
     batch_limit: i64,
@@ -58,9 +60,17 @@ impl Supervisor {
         central: Arc<CentralDb>,
         store: Arc<SessionStore>,
         queue: Arc<RunQueue>,
+        dispatcher: Arc<dyn Dispatcher>,
         config: RunConfig,
     ) -> Self {
-        Self::with_factory(central, store, queue, config, Box::new(create_provider))
+        Self::with_factory(
+            central,
+            store,
+            queue,
+            dispatcher,
+            config,
+            Box::new(create_provider),
+        )
     }
 
     #[must_use]
@@ -68,6 +78,7 @@ impl Supervisor {
         central: Arc<CentralDb>,
         store: Arc<SessionStore>,
         queue: Arc<RunQueue>,
+        dispatcher: Arc<dyn Dispatcher>,
         config: RunConfig,
         factory: ProviderFactory,
     ) -> Self {
@@ -75,6 +86,7 @@ impl Supervisor {
             central,
             store,
             queue,
+            dispatcher,
             config,
             factory,
             batch_limit: 10,
@@ -140,6 +152,7 @@ impl Supervisor {
                 system_context: None,
                 inference: inference.clone(),
                 tool_profile: group.tool_profile,
+                admin: self.agent_admin(&session, &group),
             })?;
 
             match consume_run(run).await {
@@ -205,6 +218,26 @@ impl Supervisor {
                 Ok(Some(resolved))
             }
         }
+    }
+
+    /// Hands a run admin access only when its group's `cli_scope` permits it; the
+    /// dispatcher re-enforces scope per command (M6.3), so this just opens the seam.
+    fn agent_admin(
+        &self,
+        session: &sessions::Session,
+        group: &agent_groups::AgentGroup,
+    ) -> Option<AgentAdmin> {
+        if group.cli_scope == CliScope::Disabled {
+            return None;
+        }
+        Some(AgentAdmin {
+            dispatcher: self.dispatcher.clone(),
+            caller: CallerContext::Agent {
+                session_id: session.id.clone(),
+                agent_group_id: group.id.clone(),
+                messaging_group_id: session.messaging_group_id.clone(),
+            },
+        })
     }
 
     async fn load_session(
@@ -348,11 +381,16 @@ mod tests {
         }
     }
 
+    fn dispatcher(fix: &Fixture) -> Arc<dyn Dispatcher> {
+        Arc::new(crate::commands::Registry::new(fix.central.clone()))
+    }
+
     fn supervisor(fix: &Fixture) -> Supervisor {
         Supervisor::new(
             fix.central.clone(),
             fix.store.clone(),
             fix.queue.clone(),
+            dispatcher(fix),
             run_config(fix),
         )
     }
@@ -437,6 +475,7 @@ mod tests {
             fix.central.clone(),
             fix.store.clone(),
             fix.queue.clone(),
+            dispatcher(fix),
             run_config(fix),
             Box::new(|_| Ok(Arc::new(FailingProvider))),
         )
@@ -514,6 +553,7 @@ mod tests {
             fix.central.clone(),
             fix.store.clone(),
             fix.queue.clone(),
+            dispatcher(&fix),
             run_config(&fix),
             Box::new(|_| Ok(Arc::new(SilentProvider))),
         );
@@ -586,6 +626,7 @@ mod tests {
                 fix.central.clone(),
                 fix.store.clone(),
                 fix.queue.clone(),
+                dispatcher(&fix),
                 run_config(&fix),
                 Box::new(move |_| {
                     Ok(Arc::new(GatedProvider {

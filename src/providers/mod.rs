@@ -8,12 +8,30 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::commands::{CallerContext, Dispatcher};
 use crate::protocol::entities::AgentProviderKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("failed to start agent run: {0}")]
     Spawn(String),
+}
+
+/// The capability that lets a run issue admin commands as itself (§8.7, M6.4).
+/// Present only when the group's `cli_scope` is not `disabled`; the dispatcher
+/// re-checks scope per command, so this is the seam, not the security boundary.
+#[derive(Clone)]
+pub struct AgentAdmin {
+    pub dispatcher: Arc<dyn Dispatcher>,
+    pub caller: CallerContext,
+}
+
+impl std::fmt::Debug for AgentAdmin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentAdmin")
+            .field("caller", &self.caller)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +47,8 @@ pub struct QueryInput {
     pub inference: Option<resolution::ResolvedInference>,
     /// Which tool surface the agent gets (§8.5).
     pub tool_profile: crate::protocol::entities::ToolProfile,
+    /// In-chat admin access, when the group's `cli_scope` permits it.
+    pub admin: Option<AgentAdmin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -378,6 +378,7 @@ strings fed back to the model — a confused model can self-correct; a turn neve
 | `ask_user_question` | all | `messages_out` row with `Operation::AskQuestion` (+ text for the transcript); delivery registers `pending_questions`, the channel renders a card. The run does **not** block — the user's choice returns as a normal inbound that re-wakes the session (M7.1) |
 | `bash` | coder | run a command, cwd = group workspace, timeout + output truncation |
 | `read` / `write` / `edit` | coder | workspace files; `edit` = exact-string replace |
+| `admin` | `cli_scope`≠disabled | run a registry command as this agent (`CallerContext::Agent`); the dispatcher re-applies `cli_scope`/`Hidden` gates (M6.3). In-chat self-service (§8.7) |
 
 The **tool profile** is a per-group column: `chat` (messaging tools only — the safe default) or
 `coder` (+ bash/files). §11's honesty still applies: profiles scope the polite interface, not a
@@ -419,7 +420,9 @@ chat group delegates heavy work to the coding group over `send_to_agent`.
 **Configuration surfaces** all fall out of the command registry (§9.2): an **Endpoints** resource
 (auto-generated table + form in the web admin; `claw endpoints create …` on the CLI), the groups
 form gaining endpoint/model/profile fields, and in-chat self-service ("switch to gemini") via the
-agent's `system`-row CLI access, gated by `cli_scope`/approval.
+agent's `admin` tool — an in-process call into the same registry as `CallerContext::Agent`, gated
+by `cli_scope`/approval (M6.4). The run never blocks on it; the dispatcher re-checks scope so the
+tool is the seam, not the security boundary.
 
 ---
 

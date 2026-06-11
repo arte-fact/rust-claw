@@ -112,11 +112,14 @@ folder — see CLAUDE.md §"UI verification".**
       the real registry with an `Agent` caller. The router "command gate" is N/A post-pi (the
       native loop has no slash commands the router interprets); revisit if operator slash-commands
       land. (§10)
-- [ ] **6.4 Agent-facing CLI transport.** Give coder-profile agents an `admin` tool that reaches
-      the command registry as `CallerContext::Agent` (threading a `Dispatcher` handle + caller
-      identity — `agent_group_id`/`session_id` — through `QueryInput` into the native tool layer),
-      so in-chat self-service ("switch to gemini") works under the 6.3 gates. Deferred behind
-      operator-driven config (the `claw` CLI already covers MVP admin as `Host`). Tests. (§8.5, §10)
+- [x] **6.4 Agent-facing CLI transport.** An `admin` tool reaches the command registry as
+      `CallerContext::Agent`: the supervisor threads an `AgentAdmin` (a `Dispatcher` handle + caller
+      identity) into `QueryInput` → the native `ToolContext`, but only when the group's `cli_scope`
+      ≠ `disabled` (so the tool is offered exactly when it can be used). The dispatcher re-applies
+      the 6.3 gates, so in-chat self-service ("switch to gemini") works under `cli_scope`. Tests:
+      tool presence by capability, refusal without it, dispatch-through-the-gate (allow + group-scope
+      refusal), and a full scripted-LLM e2e mutating the agent's own group via the `admin` tool.
+      (§8.5, §8.7, §10)
 
 ## M7 — Interactivity + approvals
 

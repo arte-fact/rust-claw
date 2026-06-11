@@ -2,15 +2,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use crate::protocol::content::{Operation, OutboundContent, Routing};
 use crate::protocol::entities::ToolProfile;
+use crate::protocol::frame::RequestFrame;
+use crate::providers::AgentAdmin;
 use crate::session::{NewOutboundMessage, SessionDb};
 
 use super::client::{ToolCall, ToolDefinition};
 use super::{exec, files};
 
+pub const ADMIN: &str = "admin";
 pub const SEND_MESSAGE: &str = "send_message";
 pub const SCHEDULE_TASK: &str = "schedule_task";
 pub const LIST_TASKS: &str = "list_tasks";
@@ -24,21 +27,43 @@ pub const READ: &str = "read";
 pub const WRITE: &str = "write";
 pub const EDIT: &str = "edit";
 
-/// What a tool call may touch: the group workspace, gated by the group's profile.
+/// What a tool call may touch: the group workspace (gated by profile) and, when
+/// the group's `cli_scope` permits, the admin command surface (§8.7, M6.4).
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
     pub profile: ToolProfile,
+    pub admin: Option<AgentAdmin>,
 }
 
-/// Tool surface per profile (§8.5): messaging for everyone; bash/files for coders.
+/// Tool surface (§8.5): messaging for everyone; bash/files for coders; the `admin`
+/// command tool whenever `cli_scope` is not `disabled` (independent of profile).
 #[must_use]
-pub fn definitions(profile: ToolProfile) -> Vec<ToolDefinition> {
+pub fn definitions(profile: ToolProfile, admin_enabled: bool) -> Vec<ToolDefinition> {
     let mut tools = messaging_definitions();
     if profile == ToolProfile::Coder {
         tools.extend(coder_definitions());
     }
+    if admin_enabled {
+        tools.push(admin_definition());
+    }
     tools
+}
+
+fn admin_definition() -> ToolDefinition {
+    ToolDefinition::function(
+        ADMIN,
+        "Run a claw admin command (e.g. endpoints-list, groups-update) to inspect or change \
+         configuration. Use endpoints-list / groups-list to discover names first.",
+        json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "Command name, e.g. groups-update." },
+                "args": { "type": "object", "description": "Command arguments as a JSON object." }
+            },
+            "required": ["command"]
+        }),
+    )
 }
 
 fn coder_definitions() -> Vec<ToolDefinition> {
@@ -173,7 +198,8 @@ fn messaging_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::function(
             ASK_USER_QUESTION,
-            "Ask the user a multiple-choice question and wait for their selection.",
+            "Ask the user a multiple-choice question (>=2 options). Their choice arrives later as a \
+             normal message — do not block waiting; end your turn after asking.",
             json!({
                 "type": "object",
                 "properties": {
@@ -221,6 +247,12 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
         ));
     }
     match name {
+        ADMIN => match &context.admin {
+            Some(admin) => run_admin(admin, &call.function.arguments).await,
+            None => {
+                ToolOutcome::note("error: admin commands are not available to this agent group")
+            }
+        },
         BASH => bash(context, &call.function.arguments).await,
         READ | WRITE | EDIT => {
             let workspace = context.workspace.clone();
@@ -289,6 +321,47 @@ fn dispatch_messaging(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
         SEND_TO_AGENT => send_to_agent(db, &call.function.arguments),
         ASK_USER_QUESTION => ask_user_question(db, &call.function.arguments),
         other => ToolOutcome::note(format!("error: unknown tool {other}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminArgs {
+    command: String,
+    #[serde(default)]
+    args: Map<String, Value>,
+}
+
+/// Runs an admin command through the dispatcher as this agent — the same path the
+/// operator CLI uses, so M6.3's `cli_scope`/`Hidden` gates apply uniformly.
+async fn run_admin(admin: &AgentAdmin, arguments: &str) -> ToolOutcome {
+    let parsed: AdminArgs = match serde_json::from_str(arguments) {
+        Ok(parsed) => parsed,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    let request = RequestFrame {
+        id: crate::db::generate_id("acmd"),
+        command: parsed.command,
+        args: parsed.args,
+    };
+    let response = admin
+        .dispatcher
+        .dispatch(request, admin.caller.clone())
+        .await;
+    ToolOutcome::note(render_admin_response(&response))
+}
+
+fn render_admin_response(response: &crate::protocol::frame::ResponseFrame) -> String {
+    if response.ok {
+        let data = response
+            .data
+            .as_ref()
+            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+            .unwrap_or_else(|| "ok".to_owned());
+        format!("ok: {data}")
+    } else if let Some(error) = &response.error {
+        format!("error: {}: {}", error.code.as_str(), error.message)
+    } else {
+        "error: command failed".to_owned()
     }
 }
 
@@ -485,6 +558,7 @@ fn send_to_agent(db: &SessionDb, arguments: &str) -> ToolOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::CallerContext;
     use crate::providers::native::client::FunctionCall;
     use crate::session::test_session_db;
 
@@ -504,17 +578,18 @@ mod tests {
         let context = ToolContext {
             workspace: tmp.path().to_path_buf(),
             profile,
+            admin: None,
         };
         (tmp, Arc::new(db), context)
     }
 
     #[test]
     fn coder_profile_adds_execution_tools_to_the_chat_surface() {
-        let chat: Vec<&str> = definitions(ToolProfile::Chat)
+        let chat: Vec<&str> = definitions(ToolProfile::Chat, false)
             .iter()
             .map(|tool| tool.function.name)
             .collect();
-        let coder: Vec<&str> = definitions(ToolProfile::Coder)
+        let coder: Vec<&str> = definitions(ToolProfile::Coder, false)
             .iter()
             .map(|tool| tool.function.name)
             .collect();
@@ -751,5 +826,78 @@ mod tests {
                 .expect("due")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn admin_tool_appears_only_when_enabled() {
+        let without: Vec<&str> = definitions(ToolProfile::Chat, false)
+            .iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert!(!without.contains(&ADMIN));
+        let with: Vec<&str> = definitions(ToolProfile::Chat, true)
+            .iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert!(with.contains(&ADMIN));
+    }
+
+    #[tokio::test]
+    async fn admin_tool_without_capability_is_refused() {
+        let (_tmp, db, context) = fixture(ToolProfile::Coder);
+        let outcome = dispatch(&db, &context, &call(ADMIN, r#"{"command":"groups-list"}"#)).await;
+        assert!(outcome.result.contains("not available"));
+    }
+
+    fn admin_context(scope: crate::protocol::entities::CliScope) -> (ToolContext, AgentAdmin) {
+        let central = Arc::new(crate::db::CentralDb::open_in_memory().expect("central"));
+        let group_id = central
+            .with(|conn| {
+                let mut group = crate::db::agent_groups::create(conn, "ops", "ops")?;
+                group.cli_scope = scope;
+                crate::db::agent_groups::update(conn, &group)?;
+                Ok(group.id)
+            })
+            .expect("group");
+        let admin = AgentAdmin {
+            dispatcher: Arc::new(crate::commands::Registry::new(central)),
+            caller: CallerContext::Agent {
+                session_id: crate::protocol::ids::SessionId::new("s-1"),
+                agent_group_id: group_id,
+                messaging_group_id: None,
+            },
+        };
+        let context = ToolContext {
+            workspace: std::path::PathBuf::from("."),
+            profile: ToolProfile::Chat,
+            admin: Some(admin.clone()),
+        };
+        (context, admin)
+    }
+
+    #[tokio::test]
+    async fn admin_tool_runs_a_command_through_the_dispatcher() {
+        use crate::protocol::entities::CliScope;
+        let (_tmp, db, _) = fixture(ToolProfile::Chat);
+        let (context, _admin) = admin_context(CliScope::Global);
+        let outcome = dispatch(&db, &context, &call(ADMIN, r#"{"command":"groups-list"}"#)).await;
+        assert!(outcome.result.starts_with("ok:"), "{}", outcome.result);
+        assert!(outcome.result.contains("ops"));
+    }
+
+    #[tokio::test]
+    async fn admin_tool_is_scope_gated_like_the_cli() {
+        use crate::protocol::entities::CliScope;
+        let (_tmp, db, _) = fixture(ToolProfile::Chat);
+        let (context, _admin) = admin_context(CliScope::Group);
+        // endpoints are not group-scoped, so a `group` agent is refused (M6.3).
+        let outcome = dispatch(
+            &db,
+            &context,
+            &call(ADMIN, r#"{"command":"endpoints-list"}"#),
+        )
+        .await;
+        assert!(outcome.result.starts_with("error:"), "{}", outcome.result);
+        assert!(outcome.result.contains("forbidden") || outcome.result.contains("may not"));
     }
 }
