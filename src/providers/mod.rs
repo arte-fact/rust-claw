@@ -1,6 +1,7 @@
 pub mod echo;
 pub mod native;
 pub mod pi;
+pub mod resolution;
 
 use std::path::PathBuf;
 use std::sync::Arc;

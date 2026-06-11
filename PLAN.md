@@ -54,10 +54,10 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M3 — Native provider + endpoints
 
-- [ ] **3.1 Endpoints.** `endpoints` CRUD commands (list/create/update/delete), api_key vs
+- [x] **3.1 Endpoints.** `endpoints` CRUD commands (list/create/update/delete), api_key vs
       api_key_env resolution, group→default→provider resolution chain
       (`CLAW_DEFAULT_MODEL`/`ENDPOINT`). Tests. (§8.7)
-- [ ] **3.2 OpenAI-compatible client.** `reqwest` chat-completions client: request/response types,
+- [x] **3.2 OpenAI-compatible client.** `reqwest` chat-completions client: request/response types,
       auth header, error mapping (retryable vs terminal), timeout. Tests against an in-process
       axum mock server. (§8.5)
 - [ ] **3.3 Native provider: conversation.** Context-window builder from `session.db` (token
