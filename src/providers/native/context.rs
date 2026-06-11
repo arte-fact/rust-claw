@@ -9,6 +9,14 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+// KNOWN LIMITATION (PLAN 4.7): the transcript holds chat in/out only. A turn's
+// intermediate tool rounds (bash/edit calls + results) live in run_turn's local
+// message list and are NOT persisted, so a *later* user message can't see them.
+// Within one turn the agent has full tool context; across turns it must re-derive
+// state (re-run `ls`/`read`) or rely on what it summarized into its replies. A
+// fuller fix — persisting tool rounds — is a backlog item, deferred until this
+// proves insufficient in practice.
+
 /// Builds the chat-completion message list: system prompt first, then the newest
 /// transcript entries that fit the token budget, oldest of the kept ones first.
 #[must_use]

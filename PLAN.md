@@ -82,7 +82,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **4.6 File tools.** `read` (line numbers/limits), `write` (create/overwrite), `edit`
       (exact-string replace, unique match required) — workspace-rooted path resolution. Table
       tests. (§8.5)
-- [ ] **4.7 Coding-group end-to-end.** Integration test: coder-profile group, mock LLM scripted
+- [x] **4.7 Coding-group end-to-end.** Integration test: coder-profile group, mock LLM scripted
       to call `bash` + `edit` then reply; `#[ignore]` real-model test. Decide + document the
       cross-turn tool-memory approach (transcript currently persists chat only). Milestone exit:
       chat↔coder delegation via `send_to_agent`. (§8.4, §8.5)

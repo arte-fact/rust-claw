@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use claw::config::Config;
 use claw::db::{CentralDb, agent_groups, endpoints};
-use claw::protocol::entities::AgentProviderKind;
+use claw::protocol::entities::{AgentProviderKind, ToolProfile};
 use claw::protocol::ids::EndpointName;
 
 const TOKEN: &str = "e2e-token";
@@ -96,17 +96,68 @@ async fn mock_llm_send_message_tool() -> String {
     format!("http://{addr}/v1")
 }
 
+/// Mock that drives a coder turn: `bash` first (no tool role yet), then `edit`
+/// once the bash result is back, then a plain reply — proving multi-round tool
+/// use with bash + a file edit in one turn.
+async fn mock_llm_coder() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            let names: Vec<String> = body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|m| m["role"] == "tool")
+                .filter_map(|m| m["content"].as_str().map(str::to_owned))
+                .collect();
+            let tool_call = |name: &str, args: &str| {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": Value::Null,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": name, "arguments": args}}]
+                }}]})
+            };
+            let response = if names.is_empty() {
+                tool_call("bash", r#"{"command":"echo original > note.txt"}"#)
+            } else if names.len() == 1 {
+                tool_call(
+                    "edit",
+                    r#"{"path":"note.txt","old_string":"original","new_string":"edited"}"#,
+                )
+            } else {
+                serde_json::json!({"choices": [{"message": {
+                    "role": "assistant", "content": "done — note.txt now says edited"
+                }}]})
+            };
+            Json(response)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{addr}/v1")
+}
+
 /// Pre-seed central.db with an endpoint + native group, then build the app on
 /// the same data dir — bootstrap sees the group and leaves it alone.
 fn seed_native_group(config: &Config, base_url: &str) {
+    seed_group(config, base_url, ToolProfile::Chat);
+}
+
+fn seed_group(config: &Config, base_url: &str, profile: ToolProfile) {
     let central = CentralDb::open(&config.central_db_path()).expect("central");
     central
         .with(|conn| {
             endpoints::create(conn, &EndpointName::new("mock"), base_url)?;
-            let mut group = agent_groups::create(conn, "Chat", "chat")?;
+            let mut group = agent_groups::create(conn, "Agent", "agent")?;
             group.agent_provider = Some(AgentProviderKind::Native);
             group.endpoint = Some(EndpointName::new("mock"));
-            group.model = Some("gemma4-moe-test".to_owned());
+            group.model = Some("test-model".to_owned());
+            group.tool_profile = profile;
             agent_groups::update(conn, &group)?;
             Ok(())
         })
@@ -230,4 +281,178 @@ async fn tool_call_path_sends_a_message_via_the_send_message_tool() {
     let llm_base = mock_llm_send_message_tool().await;
     let body = first_reply_body(&llm_base, "say hi").await;
     assert_eq!(body, "hi from a tool call");
+}
+
+#[tokio::test]
+async fn coder_group_runs_bash_then_edit_in_the_workspace_then_replies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: PathBuf::from(tmp.path()),
+        port: 0,
+        auth_token: Some(TOKEN.to_owned()),
+        timezone: "UTC".to_owned(),
+        default_endpoint: None,
+        default_model: None,
+    };
+    let llm_base = mock_llm_coder().await;
+    seed_group(&config, &llm_base, ToolProfile::Coder);
+
+    let app = claw::app::build(&config).await.expect("build app");
+    let cookie = login(&app.http).await;
+    let request = |req: Request<Body>| {
+        let app = app.http.clone();
+        async move { app.oneshot(req).await.expect("response") }
+    };
+
+    let chat_id = body_json(
+        request(
+            Request::post("/api/chats")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Work"}"#))
+                .expect("request"),
+        )
+        .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("platform_id")
+        .to_owned();
+
+    request(
+        Request::post(format!("/api/chats/{chat_id}/messages"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"make the note say edited"}"#))
+            .expect("request"),
+    )
+    .await;
+
+    let mut reply = None;
+    for _ in 0..100 {
+        let response = request(
+            Request::get(format!("/api/chats/{chat_id}/messages"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let transcript = body_json(response).await.as_array().expect("array").clone();
+        if let Some(out) = transcript.iter().find(|m| m["direction"] == "out") {
+            reply = Some(out["body"].as_str().expect("body").to_owned());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(reply.as_deref(), Some("done — note.txt now says edited"));
+    // The tools really ran in the group workspace: bash created note.txt, edit changed it.
+    let note = tmp.path().join("groups/agent/note.txt");
+    assert_eq!(
+        std::fs::read_to_string(&note).expect("note.txt must exist"),
+        "edited\n"
+    );
+
+    app.shutdown().await;
+}
+
+/// Run a coder group against a real OpenAI-compatible endpoint.
+/// `CLAW_TEST_ENDPOINT` (e.g. http://localhost:8000/v1), `CLAW_TEST_MODEL`,
+/// optional `CLAW_TEST_API_KEY`. Ignored by default (needs a live model).
+#[tokio::test]
+#[ignore = "requires a real LLM endpoint via CLAW_TEST_ENDPOINT/CLAW_TEST_MODEL"]
+async fn coder_group_against_a_real_endpoint() {
+    let Ok(base_url) = std::env::var("CLAW_TEST_ENDPOINT") else {
+        return;
+    };
+    let model = std::env::var("CLAW_TEST_MODEL").expect("CLAW_TEST_MODEL");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: PathBuf::from(tmp.path()),
+        port: 0,
+        auth_token: Some(TOKEN.to_owned()),
+        timezone: "UTC".to_owned(),
+        default_endpoint: None,
+        default_model: None,
+    };
+    let central = CentralDb::open(&config.central_db_path()).expect("central");
+    central
+        .with(|conn| {
+            let endpoint = EndpointName::new("real");
+            endpoints::create(conn, &endpoint, &base_url)?;
+            if let Ok(key) = std::env::var("CLAW_TEST_API_KEY") {
+                let mut row = endpoints::get(conn, &endpoint)?.expect("endpoint");
+                row.api_key = Some(key);
+                endpoints::update(conn, &row)?;
+            }
+            let mut group = agent_groups::create(conn, "Coder", "agent")?;
+            group.agent_provider = Some(AgentProviderKind::Native);
+            group.endpoint = Some(endpoint);
+            group.model = Some(model);
+            group.tool_profile = ToolProfile::Coder;
+            agent_groups::update(conn, &group)?;
+            Ok(())
+        })
+        .expect("seed");
+
+    let app = claw::app::build(&config).await.expect("build app");
+    let cookie = login(&app.http).await;
+    let request = |req: Request<Body>| {
+        let app = app.http.clone();
+        async move { app.oneshot(req).await.expect("response") }
+    };
+
+    let chat_id = body_json(
+        request(
+            Request::post("/api/chats")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Work"}"#))
+                .expect("request"),
+        )
+        .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("platform_id")
+        .to_owned();
+
+    request(
+        Request::post(format!("/api/chats/{chat_id}/messages"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"text":"create a file hello.txt containing the word banana, then tell me you did it"}"#,
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    let mut replied = false;
+    for _ in 0..600 {
+        let response = request(
+            Request::get(format!("/api/chats/{chat_id}/messages"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let transcript = body_json(response).await.as_array().expect("array").clone();
+        if transcript.iter().any(|m| m["direction"] == "out") {
+            replied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(replied, "the agent must reply");
+
+    let hello = std::fs::read_to_string(tmp.path().join("groups/agent/hello.txt"))
+        .expect("hello.txt must exist");
+    assert!(
+        hello.to_lowercase().contains("banana"),
+        "file should contain banana, got: {hello}"
+    );
+
+    app.shutdown().await;
 }

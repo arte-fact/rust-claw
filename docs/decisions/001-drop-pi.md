@@ -39,8 +39,12 @@ tool and three file tools** — `grep`/`find`/`ls` are bash one-liners.
 - No pi `edit` polish, LSP, or skills; our `edit` is exact-string-replace.
 - No Claude Pro/Max subscription auth (pi perk); the native client is API-key/OpenAI-compatible,
   which covers the planned OpenRouter + local-inference setups.
-- Cross-turn tool memory: the transcript persists chat in/out only; intermediate tool rounds are
-  not yet replayed into later context (tracked in PLAN 4.7).
+- Cross-turn tool memory: the transcript persists chat in/out only. Within a single turn the
+  agent keeps full tool context (the multi-round loop in `run_turn`); across *separate* user
+  messages it does not see prior tool rounds, so it must re-derive state (re-run `ls`/`read`) or
+  rely on what it summarized into its replies. Acceptable for MVP — most coding interactions are
+  one multi-step turn. Documented at `native/context.rs`; a fuller fix (persisting tool rounds) is
+  a backlog item, deferred until it proves insufficient.
 
 ## MCP
 
