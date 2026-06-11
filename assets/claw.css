@@ -172,6 +172,29 @@ button:hover { background: var(--color-surface-raised); }
 .chat-status { font-size: var(--text-xs); color: var(--color-pending); }
 .chat-status--working::before { content: '󰪞 '; }
 
+.chat-archive {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  background: none;
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+.chat-archive:hover { border-color: var(--color-accent); color: var(--color-text-strong); }
+
+.archived { margin-top: var(--space-2); }
+.archived summary {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+.chat-link--muted { color: var(--color-text-muted); }
+.chat-link--muted .chat-name { font-style: italic; }
+
 .transcript {
   flex: 1;
   overflow-y: auto;

@@ -80,6 +80,21 @@
     });
   }
 
+  // Archive / unarchive the current chat, then return to the chat list.
+  const archiveButton = document.querySelector('.chat-archive');
+  if (archiveButton) {
+    archiveButton.addEventListener('click', async () => {
+      const { chat, archived } = archiveButton.dataset;
+      archiveButton.disabled = true;
+      const response = await fetch(`/api/chats/${chat}/archive`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ archived: archived === 'true' }),
+      });
+      window.location.href = response.ok && archived === 'true' ? '/' : `/chats/${chat}`;
+    });
+  }
+
   const composer = document.getElementById('composer');
   const input = document.getElementById('composer-input');
 

@@ -44,6 +44,10 @@ pub fn build_app(state: WebState) -> Router {
             get(api::list_messages).post(api::post_message),
         )
         .route(
+            "/api/chats/{platform_id}/archive",
+            axum::routing::post(api::archive_chat),
+        )
+        .route(
             "/api/questions/{question_id}/answer",
             axum::routing::post(api::answer_question),
         )

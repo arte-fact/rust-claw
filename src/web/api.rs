@@ -62,7 +62,10 @@ pub async fn list_chats(State(state): State<WebState>) -> Result<Json<Vec<ChatSu
         central.with(|conn| {
             Ok(messaging_groups::list(conn)?
                 .into_iter()
-                .filter(|group| group.channel_type == crate::channels::web::CHANNEL_TYPE)
+                .filter(|group| {
+                    group.channel_type == crate::channels::web::CHANNEL_TYPE
+                        && group.archived_at.is_none()
+                })
                 .map(|group| ChatSummary {
                     platform_id: group.platform_id,
                     name: group.name,
@@ -371,6 +374,38 @@ pub async fn answer_approval(
         .await
         .map_err(|err| ApiError::Channel(err.to_string()))?;
     Ok(Json(card))
+}
+
+#[derive(Deserialize)]
+pub struct ArchiveChat {
+    pub archived: bool,
+}
+
+/// Archives or restores a chat (M9.2). Archived chats drop out of the active list
+/// but keep their history.
+pub async fn archive_chat(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Json(body): Json<ArchiveChat>,
+) -> Result<StatusCode, ApiError> {
+    let central = state.central.clone();
+    let changed = blocking(move || {
+        central.with(|conn| {
+            let Some(chat) = messaging_groups::get_by_platform(
+                conn,
+                crate::channels::web::CHANNEL_TYPE,
+                &platform_id,
+            )?
+            else {
+                return Ok(None);
+            };
+            messaging_groups::set_archived(conn, &chat.id, body.archived).map(Some)
+        })
+    })
+    .await?
+    .ok_or(ApiError::ChatNotFound)?;
+    let _ = changed;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn blocking<T>(

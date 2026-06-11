@@ -24,6 +24,21 @@
     <form class="new-chat" method="post" action="/chats">
       <input name="name" placeholder="+ new chat" required autocomplete="off">
     </form>
+    {% if !archived.is_empty() %}
+    <details class="archived">
+      <summary>archived ({{ archived.len() }})</summary>
+      <ul class="chat-list">
+        {% for chat in archived %}
+        <li>
+          <a class="chat-link chat-link--muted{% if chat.active %} chat-link--active{% endif %}"
+             href="/chats/{{ chat.platform_id }}">
+            <span class="chat-name">{{ chat.label }}</span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
     <a class="admin-back" href="/admin/endpoints">⚙ admin</a>
   </nav>
   <main class="chat">
@@ -31,6 +46,13 @@
     <header class="chat-header">
       <h1>{{ current.label }}</h1>
       <span class="chat-status" id="chat-status"></span>
+      {% if current.archived %}
+      <button type="button" class="chat-archive" data-chat="{{ current.platform_id }}"
+              data-archived="false">unarchive</button>
+      {% else %}
+      <button type="button" class="chat-archive" data-chat="{{ current.platform_id }}"
+              data-archived="true">archive</button>
+      {% endif %}
     </header>
     <section class="transcript" id="transcript" data-chat="{{ current.platform_id }}">
       {% for message_html in current.messages %}{{ message_html|safe }}{% endfor %}

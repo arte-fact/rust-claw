@@ -437,6 +437,13 @@ tool is the seam, not the security boundary.
 One axum app serves everything: static UI (embedded in the binary at build time), REST API, SSE
 stream, and webhook endpoints for future adapters.
 
+**Chats** are web messaging groups: the sidebar lists the active ones, "+ new chat" creates one
+(wired to the first agent group), and `groups-create` (M9.1) makes a chat wired to a *specific*
+new agent. **Archiving** (M9.2, `archived_at`) drops a chat into a collapsible "archived" section
+without deleting its history; the chat header toggles it. The `trigger=0` accumulate policy and
+per-thread sessions live in the router/session layer but have no UI surface on the single-user web
+DM (always-engage, Shared mode) — they activate when group/threaded channels land.
+
 **Auth:** single shared secret (`CLAW_AUTH_TOKEN` env; generated and printed on first start if
 unset). Login page exchanges it for an HttpOnly session cookie; every `/api` and SSE route sits
 behind the middleware. The web user is `web:owner` in the entity model and is auto-granted the

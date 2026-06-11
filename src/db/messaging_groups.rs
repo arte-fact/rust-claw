@@ -16,6 +16,7 @@ pub struct MessagingGroup {
     pub is_group: bool,
     pub unknown_sender_policy: UnknownSenderPolicy,
     pub denied_at: Option<String>,
+    pub archived_at: Option<String>,
     pub created_at: String,
 }
 
@@ -162,7 +163,7 @@ pub fn unwire(conn: &Connection, wiring_id: &str) -> Result<bool, rusqlite::Erro
 }
 
 const SELECT_GROUP: &str = "SELECT id, channel_type, platform_id, name, is_group,
-        unknown_sender_policy, denied_at, created_at FROM messaging_groups";
+        unknown_sender_policy, denied_at, archived_at, created_at FROM messaging_groups";
 
 const SELECT_WIRING: &str = "SELECT id, messaging_group_id, agent_group_id, engage_mode,
         engage_pattern, sender_scope, ignored_message_policy, session_mode, priority, created_at
@@ -177,8 +178,30 @@ fn group_from_row(row: &Row<'_>) -> Result<MessagingGroup, rusqlite::Error> {
         is_group: row.get(4)?,
         unknown_sender_policy: row.get(5)?,
         denied_at: row.get(6)?,
-        created_at: row.get(7)?,
+        archived_at: row.get(7)?,
+        created_at: row.get(8)?,
     })
+}
+
+/// Archives or restores a chat. Returns whether a row changed.
+pub fn set_archived(
+    conn: &Connection,
+    id: &MessagingGroupId,
+    archived: bool,
+) -> Result<bool, rusqlite::Error> {
+    let changed = if archived {
+        conn.execute(
+            "UPDATE messaging_groups SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND archived_at IS NULL",
+            params![id],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE messaging_groups SET archived_at = NULL WHERE id = ?1",
+            params![id],
+        )?
+    };
+    Ok(changed > 0)
 }
 
 fn wiring_from_row(row: &Row<'_>) -> Result<Wiring, rusqlite::Error> {
@@ -210,6 +233,28 @@ mod tests {
             let found = get_by_platform(conn, "web", "chat-1")?.expect("must exist");
             assert_eq!(found, created);
             assert_eq!(get_by_platform(conn, "web", "other")?, None);
+            Ok(())
+        })
+        .expect("db ops");
+    }
+
+    #[test]
+    fn archive_and_restore_toggles_archived_at() {
+        let db = CentralDb::open_in_memory().expect("open");
+        db.with(|conn| {
+            let chat = create(conn, "web", "chat-1", Some("Main"), false)?;
+            assert_eq!(chat.archived_at, None);
+
+            assert!(set_archived(conn, &chat.id, true)?);
+            assert!(
+                get(conn, &chat.id)?.expect("exists").archived_at.is_some(),
+                "archived_at set"
+            );
+            // Idempotent: archiving an archived chat changes nothing.
+            assert!(!set_archived(conn, &chat.id, true)?);
+
+            assert!(set_archived(conn, &chat.id, false)?);
+            assert_eq!(get(conn, &chat.id)?.expect("exists").archived_at, None);
             Ok(())
         })
         .expect("db ops");

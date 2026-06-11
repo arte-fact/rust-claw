@@ -59,6 +59,7 @@ pub async fn login_page(Query(query): Query<LoginQuery>) -> Response {
 #[template(path = "shell.html")]
 struct ShellPage {
     chats: Vec<ChatItem>,
+    archived: Vec<ChatItem>,
     current: Option<CurrentChat>,
 }
 
@@ -72,6 +73,7 @@ struct CurrentChat {
     platform_id: String,
     label: String,
     messages: Vec<String>,
+    archived: bool,
 }
 
 pub async fn home(State(state): State<WebState>) -> Result<Response, ApiError> {
@@ -102,15 +104,22 @@ async fn shell(state: WebState, selected: Option<String>) -> Result<Response, Ap
     let central = state.central.clone();
     let page = crate::blocking::run::<_, _, ApiError>(move || {
         central.with(|conn| {
-            let chats: Vec<ChatItem> = messaging_groups::list(conn)?
+            let (mut chats, mut archived) = (Vec::new(), Vec::new());
+            for group in messaging_groups::list(conn)?
                 .into_iter()
                 .filter(|group| group.channel_type == crate::channels::web::CHANNEL_TYPE)
-                .map(|group| ChatItem {
+            {
+                let item = ChatItem {
                     active: selected.as_deref() == Some(group.platform_id.as_str()),
                     label: group.name.unwrap_or_else(|| group.platform_id.clone()),
                     platform_id: group.platform_id,
-                })
-                .collect();
+                };
+                if group.archived_at.is_some() {
+                    archived.push(item);
+                } else {
+                    chats.push(item);
+                }
+            }
 
             let current = match &selected {
                 None => None,
@@ -131,10 +140,15 @@ async fn shell(state: WebState, selected: Option<String>) -> Result<Response, Ap
                         platform_id: group.platform_id,
                         label: group.name.unwrap_or_else(|| "unnamed".to_owned()),
                         messages,
+                        archived: group.archived_at.is_some(),
                     })
                 }
             };
-            Ok(Some(ShellPage { chats, current }))
+            Ok(Some(ShellPage {
+                chats,
+                archived,
+                current,
+            }))
         })
     })
     .await?

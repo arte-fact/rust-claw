@@ -212,6 +212,70 @@ async fn admin_renders_resources_and_runs_commands_as_host() {
 }
 
 #[tokio::test]
+async fn archiving_a_chat_drops_it_from_the_active_list() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(tmp.path().to_path_buf());
+    let app = claw::app::build(&config).await.expect("build app");
+    let client = Client::login(app.http.clone()).await;
+
+    let chat_id = body_json(
+        client
+            .post_json("/api/chats", &serde_json::json!({"name": "Main"}))
+            .await,
+    )
+    .await["platform_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        body_json(client.get("/api/chats").await)
+            .await
+            .as_array()
+            .expect("array")
+            .len(),
+        1
+    );
+
+    // Archive → gone from the active list, but the shell still shows it under "archived".
+    let archived = client
+        .post_json(
+            &format!("/api/chats/{chat_id}/archive"),
+            &serde_json::json!({"archived": true}),
+        )
+        .await;
+    assert_eq!(archived.status(), StatusCode::NO_CONTENT);
+    assert!(
+        body_json(client.get("/api/chats").await)
+            .await
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "archived chat must leave the active list"
+    );
+    let shell = body_text(client.get("/").await).await;
+    assert!(shell.contains("archived (1)"), "archived section shows it");
+
+    // Unarchive → back in the active list.
+    let restored = client
+        .post_json(
+            &format!("/api/chats/{chat_id}/archive"),
+            &serde_json::json!({"archived": false}),
+        )
+        .await;
+    assert_eq!(restored.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        body_json(client.get("/api/chats").await)
+            .await
+            .as_array()
+            .expect("array")
+            .len(),
+        1
+    );
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn admin_creates_an_agent_with_its_own_chat() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = test_config(tmp.path().to_path_buf());

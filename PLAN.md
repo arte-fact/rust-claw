@@ -183,9 +183,15 @@ folder — see CLAUDE.md §"UI verification".**
       M6.4 `admin` tool. The folder + a starter `AGENT.md` are scaffolded by the supervisor on first
       run (never clobbering an edited one). Tests: Host creates row+chat+wiring, agent path is held,
       scaffold writes/keeps AGENT.md, and an HTTP test (admin creates an agent → its chat appears). (§8.6)
-- [ ] **9.2 Multi-chat UI.** Multiple web chats (create/archive), per-thread sessions surfaced in
-      the UI, accumulate (`trigger=0`) policy support end-to-end. Visual verification: snapshot
-      the chat list + thread views.
+- [x] **9.2 Multi-chat UI.** Multiple web chats: **create** (sidebar form + M9.1 per-agent chats)
+      and **archive/unarchive** (migration 006 `archived_at`; `set_archived`; `POST
+      /api/chats/:id/archive`). Archived chats drop from the active list (and `/api/chats`) into a
+      collapsible "archived (N)" sidebar section; the chat header carries an archive/unarchive button.
+      Per-thread sessions and the `trigger=0` accumulate **policy are surfaced in the router**
+      (M8.2) but have no UI surface on the web DM (Shared mode, always-engage) — deferred with group
+      channels. Tests: `set_archived` toggle, archive HTTP round-trip (drops from list, shows under
+      "archived", restores). Screenshot: refreshed `chat.png` (multi-chat list + archived section +
+      archive button).
 
 Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
 the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for

@@ -34,6 +34,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "005-pending-approvals",
         up: pending_approvals,
     },
+    Migration {
+        version: 6,
+        name: "006-archive-chats",
+        up: archive_chats,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -240,6 +245,12 @@ fn pending_approvals(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// Archived chats stay in the DB (history intact) but drop out of the active chat
+/// list; `archived_at IS NULL` means active (M9.2).
+fn archive_chats(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("ALTER TABLE messaging_groups ADD COLUMN archived_at TEXT;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +275,7 @@ mod tests {
                 (3, "003-tool-profile".to_owned()),
                 (4, "004-question-cards".to_owned()),
                 (5, "005-pending-approvals".to_owned()),
+                (6, "006-archive-chats".to_owned()),
             ]
         );
     }
