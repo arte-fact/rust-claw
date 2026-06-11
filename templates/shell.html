@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="logo">claw</div>
+    <ul class="chat-list">
+      {% for chat in chats %}
+      <li>
+        <a class="chat-link{% if chat.active %} chat-link--active{% endif %}"
+           href="/chats/{{ chat.platform_id }}" data-chat="{{ chat.platform_id }}">
+          <span class="chat-dot"></span><span class="chat-name">{{ chat.label }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    <form class="new-chat" method="post" action="/chats">
+      <input name="name" placeholder="+ new chat" required autocomplete="off">
+    </form>
+  </nav>
+  <main class="chat">
+    {% if let Some(current) = current %}
+    <header class="chat-header">
+      <h1>{{ current.label }}</h1>
+      <span class="chat-status" id="chat-status"></span>
+    </header>
+    <section class="transcript" id="transcript" data-chat="{{ current.platform_id }}">
+      {% for message_html in current.messages %}{{ message_html|safe }}{% endfor %}
+    </section>
+    <form class="composer" id="composer">
+      <textarea id="composer-input" rows="1" placeholder="write a message…"
+                autofocus autocomplete="off"></textarea>
+      <button type="submit">send</button>
+    </form>
+    {% else %}
+    <section class="empty-state"><p>select a chat — or create one</p></section>
+    {% endif %}
+  </main>
+</div>
+<script src="/assets/claw.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<article class="msg msg--{{ direction }}" id="m{{ id }}">
+  <header class="msg-meta">
+    <span class="msg-sender">{{ sender }}</span>
+    <time class="msg-time">{{ time }}</time>
+  </header>
+  <div class="msg-body">{{ body_html|safe }}</div>
+</article>
