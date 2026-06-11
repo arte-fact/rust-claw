@@ -34,6 +34,10 @@ pub fn build_app(state: WebState) -> Router {
             "/api/chats/{platform_id}/messages",
             get(api::list_messages).post(api::post_message),
         )
+        .route(
+            "/api/questions/{question_id}/answer",
+            axum::routing::post(api::answer_question),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

@@ -375,7 +375,7 @@ strings fed back to the model — a confused model can self-correct; a turn neve
 | `send_file` | all | stage file → `outbox/<msg_id>/`, row with `files` |
 | `schedule_task` / task ops | all | `system` rows → host inserts/updates `messages_in` |
 | `send_to_agent` | all | row with `channel_type='agent'`, `platform_id=<target group>` |
-| `ask_user_question` | all | row with `Operation::AskQuestion`; resolution lands in M7 |
+| `ask_user_question` | all | `messages_out` row with `Operation::AskQuestion` (+ text for the transcript); delivery registers `pending_questions`, the channel renders a card. The run does **not** block — the user's choice returns as a normal inbound that re-wakes the session (M7.1) |
 | `bash` | coder | run a command, cwd = group workspace, timeout + output truncation |
 | `read` / `write` / `edit` | coder | workspace files; `edit` = exact-string replace |
 
@@ -440,9 +440,13 @@ behind the middleware. The web user is `web:owner` in the entity model and is au
 - `deliver()` → append to the **`web_messages` ledger** (central DB: per-chat rendered transcript —
   the one thing platform channels got for free that we must store) → push over the SSE hub to
   connected browsers.
-- `Operation::AskQuestion` renders as buttons; the click POSTs back and resolves the pending
-  question (central `pending_questions` table, unchanged). Edits and reactions mutate the ledger
-  row and push an SSE update.
+- `Operation::AskQuestion` is delivered as a **question card**: a `web_messages` row of
+  `kind='question'` (carrying `question_id`/`options`/`answer`, migration 004) plus a
+  `pending_questions` registry row. The buttons `POST /api/questions/:id/answer`; the handler
+  validates the choice against the open question, collapses the card (`answer` set → SSE
+  `message_update`), and submits the choice as a normal inbound so the asking session re-wakes.
+  Unanswered cards collapse to "no answer" once the sweep passes their TTL. Edits and reactions
+  mutate the ledger row and push an SSE update.
 - Typing/progress: `Progress` events from the running session surface as a live "working…" status
   line — strictly better than typing indicators.
 

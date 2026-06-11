@@ -154,3 +154,109 @@ async fn unknown_chat_returns_404() {
 
     app.shutdown().await;
 }
+
+#[tokio::test]
+async fn answering_a_question_collapses_the_card_and_rejects_bad_input() {
+    use claw::db::{CentralDb, messaging_groups, questions, sessions, web_messages};
+    use claw::protocol::content::Routing;
+    use claw::protocol::ids::MessageOutId;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(tmp.path().to_path_buf());
+    let app = claw::app::build(&config).await.expect("build app");
+    let client = Client::login(app.http.clone()).await;
+
+    let chat = body_json(
+        client
+            .post_json("/api/chats", &serde_json::json!({"name": "Main"}))
+            .await,
+    )
+    .await;
+    let chat_id = chat["platform_id"].as_str().expect("id").to_owned();
+
+    // A posted message creates the session the answer will be routed back to;
+    // wait for the echo reply so the session row exists before seeding.
+    client
+        .post_json(
+            &format!("/api/chats/{chat_id}/messages"),
+            &serde_json::json!({"text": "hi"}),
+        )
+        .await;
+    let messages_path = format!("/api/chats/{chat_id}/messages");
+    for _ in 0..100 {
+        let count = body_json(client.get(&messages_path).await)
+            .await
+            .as_array()
+            .expect("array")
+            .len();
+        if count >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Seed an open question + card directly, as the delivery path would.
+    let options = vec!["ship".to_owned(), "wait".to_owned()];
+    {
+        let central = CentralDb::open(&config.central_db_path()).expect("central");
+        central
+            .with(|conn| {
+                let chat = messaging_groups::get_by_platform(conn, "web", &chat_id)?.expect("chat");
+                let session = sessions::list_active(conn)?.remove(0);
+                let routing = Routing {
+                    channel_type: Some("web".to_owned()),
+                    platform_id: Some(chat_id.clone()),
+                    thread_id: None,
+                };
+                questions::insert(
+                    conn,
+                    "q-test",
+                    &session.id,
+                    &MessageOutId::new("out-x"),
+                    &routing,
+                    "Deploy now?",
+                    &options,
+                )?;
+                web_messages::append_question(
+                    conn,
+                    &chat.id,
+                    "andy",
+                    "Deploy now?",
+                    "q-test",
+                    &options,
+                )
+                .map(|_| ())
+            })
+            .expect("seed");
+    }
+
+    // A choice outside the offered options is rejected without consuming it.
+    let bad = client
+        .post_json(
+            "/api/questions/q-test/answer",
+            &serde_json::json!({"option": "nope"}),
+        )
+        .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    // The valid answer collapses the card.
+    let ok = client
+        .post_json(
+            "/api/questions/q-test/answer",
+            &serde_json::json!({"option": "ship"}),
+        )
+        .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(body_json(ok).await["answer"], "ship");
+
+    // Answering again finds no open question.
+    let again = client
+        .post_json(
+            "/api/questions/q-test/answer",
+            &serde_json::json!({"option": "ship"}),
+        )
+        .await;
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+
+    app.shutdown().await;
+}

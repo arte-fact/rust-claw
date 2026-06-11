@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{CentralDb, messaging_groups, web_messages};
+use crate::protocol::content::Operation;
 use crate::router::InboundEvent;
 use crate::web::sse::Hub;
 
@@ -55,6 +56,38 @@ impl WebChannel {
             .text
             .clone()
             .unwrap_or_else(|| "[no text]".to_owned());
+        self.ledger(address, |conn, chat| {
+            web_messages::append(
+                conn,
+                chat,
+                web_messages::Direction::Out,
+                AGENT_SENDER,
+                &body,
+                None,
+            )
+        })
+    }
+
+    fn ledger_question(
+        &self,
+        address: &Address,
+        question: &str,
+        question_id: &str,
+        options: &[String],
+    ) -> Result<web_messages::WebMessage, ChannelError> {
+        self.ledger(address, |conn, chat| {
+            web_messages::append_question(conn, chat, AGENT_SENDER, question, question_id, options)
+        })
+    }
+
+    fn ledger(
+        &self,
+        address: &Address,
+        write: impl FnOnce(
+            &rusqlite::Connection,
+            &crate::protocol::ids::MessagingGroupId,
+        ) -> Result<web_messages::WebMessage, rusqlite::Error>,
+    ) -> Result<web_messages::WebMessage, ChannelError> {
         self.central
             .with(|conn| {
                 let Some(chat) =
@@ -62,15 +95,7 @@ impl WebChannel {
                 else {
                     return Ok(None);
                 };
-                web_messages::append(
-                    conn,
-                    &chat.id,
-                    web_messages::Direction::Out,
-                    AGENT_SENDER,
-                    &body,
-                    None,
-                )
-                .map(Some)
+                write(conn, &chat.id).map(Some)
             })
             .map_err(|err| ChannelError::Delivery(err.to_string()))?
             .ok_or_else(|| {
@@ -107,7 +132,15 @@ impl ChannelAdapter for WebChannel {
         address: &Address,
         delivery: &OutboundDelivery,
     ) -> Result<Option<String>, ChannelError> {
-        let message = self.ledger_outbound(address, delivery)?;
+        let message = match &delivery.content.operation {
+            Some(Operation::AskQuestion {
+                question_id,
+                question,
+                options,
+                ..
+            }) => self.ledger_question(address, question, question_id, options)?,
+            _ => self.ledger_outbound(address, delivery)?,
+        };
         self.hub.publish(
             "message",
             crate::web::render::message_event_payload(&address.platform_id, &message),
@@ -167,6 +200,48 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sender, AGENT_SENDER);
         assert_eq!(rows[0].direction, web_messages::Direction::Out);
+    }
+
+    #[tokio::test]
+    async fn deliver_ask_question_renders_a_card_row_and_sse() {
+        let (central, channel, hub) = fixture();
+        let mut events = hub.subscribe();
+        let address = Address {
+            platform_id: "chat-1".to_owned(),
+            thread_id: None,
+        };
+        let delivery = OutboundDelivery {
+            kind: "chat".to_owned(),
+            content: OutboundContent {
+                text: Some("Deploy now? (ship / wait)".to_owned()),
+                files: Vec::new(),
+                operation: Some(crate::protocol::content::Operation::AskQuestion {
+                    question_id: "q-1".to_owned(),
+                    title: "Deploy now?".to_owned(),
+                    question: "Deploy now?".to_owned(),
+                    options: vec!["ship".to_owned(), "wait".to_owned()],
+                }),
+                extra: serde_json::Map::new(),
+            },
+            files: Vec::new(),
+        };
+
+        channel.deliver(&address, &delivery).await.expect("deliver");
+
+        let event = events.recv().await.expect("sse");
+        assert_eq!(event.kind, "message");
+        assert!(event.data.contains("data-question=\\\"q-1\\\""));
+
+        let card = central
+            .with(|conn| {
+                let chat = messaging_groups::get_by_platform(conn, "web", "chat-1")?.expect("chat");
+                Ok(web_messages::list(conn, &chat.id, 10)?.remove(0))
+            })
+            .expect("ledger");
+        assert_eq!(card.kind, web_messages::MessageRowKind::Question);
+        assert_eq!(card.question_id.as_deref(), Some("q-1"));
+        assert_eq!(card.options, vec!["ship".to_owned(), "wait".to_owned()]);
+        assert_eq!(card.answer, None);
     }
 
     #[tokio::test]

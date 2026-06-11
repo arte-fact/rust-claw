@@ -5,11 +5,13 @@ use jiff::tz::TimeZone;
 use tokio_util::sync::CancellationToken;
 
 use crate::cron::Cron;
-use crate::db::{CentralDb, DbError, sessions};
+use crate::db::{CentralDb, DbError, questions, sessions, web_messages};
 use crate::runs::queue::RunQueue;
 use crate::session::{InboundMessage, SessionDb, SessionStore, SessionStoreError};
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How long an unanswered question stays open before the card collapses to "no answer".
+const QUESTION_TTL_SECONDS: i64 = 24 * 3600;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
@@ -70,7 +72,21 @@ impl Sweep {
                 tracing::error!(session = %session.id, %error, "session sweep failed");
             }
         }
-        Ok(())
+        self.expire_questions().await
+    }
+
+    /// Collapses the cards of questions that went unanswered past their TTL.
+    async fn expire_questions(&self) -> Result<(), SweepError> {
+        let central = self.central.clone();
+        blocking(move || {
+            central.with(|conn| {
+                for stale in questions::expire_stale(conn, QUESTION_TTL_SECONDS)? {
+                    web_messages::resolve_question(conn, &stale.question_id, "no answer")?;
+                }
+                Ok(())
+            })
+        })
+        .await
     }
 
     pub async fn sweep_session(&self, session: &sessions::Session) -> Result<(), SweepError> {

@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{DbError, agent_groups, messaging_groups, web_messages};
+use crate::db::{DbError, agent_groups, messaging_groups, questions, web_messages};
 use crate::protocol::content::ChatContent;
 use crate::protocol::ids::UserId;
 use crate::protocol::message::MessageKind;
@@ -25,6 +25,10 @@ pub enum ApiError {
     ChatNotFound,
     #[error("no agent group exists to wire the chat to")]
     NoAgentGroup,
+    #[error("question is no longer open")]
+    QuestionClosed,
+    #[error("{0:?} is not one of the offered options")]
+    NotAnOption(String),
     #[error("channel error: {0}")]
     Channel(String),
 }
@@ -32,8 +36,9 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::ChatNotFound => StatusCode::NOT_FOUND,
+            Self::ChatNotFound | Self::QuestionClosed => StatusCode::NOT_FOUND,
             Self::NoAgentGroup => StatusCode::CONFLICT,
+            Self::NotAnOption(_) => StatusCode::BAD_REQUEST,
             Self::Db(_) | Self::Join(_) | Self::Channel(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()
@@ -196,6 +201,74 @@ pub async fn post_message(
         .await
         .map_err(|err| ApiError::Channel(err.to_string()))?;
     Ok(Json(ledgered))
+}
+
+#[derive(Deserialize)]
+pub struct AnswerQuestion {
+    pub option: String,
+}
+
+/// Records a user's choice for an open question: collapses the card and re-wakes
+/// the asking session with the answer as a normal inbound message.
+pub async fn answer_question(
+    State(state): State<WebState>,
+    Path(question_id): Path<String>,
+    Json(body): Json<AnswerQuestion>,
+) -> Result<Json<web_messages::WebMessage>, ApiError> {
+    let central = state.central.clone();
+    let option = body.option.clone();
+    let qid = question_id.clone();
+    let (routing, card) = blocking(move || {
+        central.with(|conn| {
+            let Some(question) = questions::get(conn, &qid)? else {
+                return Ok(Err(ApiError::QuestionClosed));
+            };
+            if !question.options.iter().any(|allowed| allowed == &option) {
+                return Ok(Err(ApiError::NotAnOption(option.clone())));
+            }
+            questions::take(conn, &qid)?;
+            match web_messages::resolve_question(conn, &qid, &option)? {
+                Some(card) => Ok(Ok((question.routing, card))),
+                None => Ok(Err(ApiError::QuestionClosed)),
+            }
+        })
+    })
+    .await??;
+
+    let platform_id = routing
+        .platform_id
+        .clone()
+        .ok_or(ApiError::QuestionClosed)?;
+
+    state.hub.publish(
+        "message_update",
+        super::render::message_update_payload(&card),
+    );
+
+    let content = ChatContent {
+        sender: "you".to_owned(),
+        sender_id: Some(UserId::new(OWNER_USER_ID)),
+        text: body.option,
+        attachments: Vec::new(),
+        is_from_me: false,
+        quoted: None,
+    };
+    let event = InboundEvent {
+        channel_type: crate::channels::web::CHANNEL_TYPE.to_owned(),
+        platform_id,
+        thread_id: routing.thread_id,
+        kind: MessageKind::Chat,
+        content: serde_json::to_string(&content)
+            .map_err(|err| ApiError::Channel(err.to_string()))?,
+        is_mention: false,
+        is_group: false,
+    };
+    state
+        .web_channel
+        .submit(event)
+        .await
+        .map_err(|err| ApiError::Channel(err.to_string()))?;
+    Ok(Json(card))
 }
 
 async fn blocking<T>(

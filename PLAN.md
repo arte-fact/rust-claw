@@ -120,9 +120,13 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M7 — Interactivity + approvals
 
-- [ ] **7.1 ask_user_question end-to-end.** `pending_questions`, question card template + SSE,
-      answer POST → resolution unblocking the native tool; card collapse on answer; timeout.
-      Visual verification: snapshot the card pre/post answer. (§8.5, §9.1)
+- [x] **7.1 ask_user_question end-to-end.** `ask_user_question` writes an `Operation::AskQuestion`
+      outbound (+ transcript text); delivery registers `pending_questions`; the web channel renders
+      a `kind='question'` card row (migration 004) over the existing `message` SSE. `POST
+      /api/questions/:id/answer` validates the choice, collapses the card (`message_update` SSE),
+      and re-wakes the session with the answer as a normal inbound — the run never blocks (fits the
+      global sequential queue). Unanswered cards expire via the sweep TTL. Visual verification:
+      `screenshots/question-card.png` (open + collapsed states). (§8.5, §9.1)
 - [ ] **7.2 Approvals.** `Access::Approval` gating, `pick_approver` (owner for web-first),
       approval cards in the UI slot, allow/deny → action execution + `system` result row. Tests. (§10)
 - [ ] **7.3 Web admin.** Registry-driven tables + forms (groups incl. provider/endpoint/model

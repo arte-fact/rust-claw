@@ -26,7 +26,7 @@ pub fn insert(
     let options_json = serde_json::to_string(options)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
     conn.execute(
-        "INSERT INTO pending_questions
+        "INSERT OR IGNORE INTO pending_questions
            (question_id, session_id, message_out_id, platform_id, channel_type, thread_id,
             title, options_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
@@ -42,6 +42,20 @@ pub fn insert(
         ],
     )?;
     Ok(())
+}
+
+pub fn get(
+    conn: &Connection,
+    question_id: &str,
+) -> Result<Option<PendingQuestion>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT question_id, session_id, message_out_id, platform_id, channel_type,
+                thread_id, title, options_json, created_at
+         FROM pending_questions WHERE question_id = ?1",
+        params![question_id],
+        from_row,
+    )
+    .optional()
 }
 
 pub fn take(
@@ -64,6 +78,30 @@ pub fn take(
         )?;
     }
     Ok(question)
+}
+
+/// Deletes questions older than `ttl_seconds` and returns them, so the caller can
+/// collapse their cards. The cutoff is computed in SQLite in the same timestamp
+/// format the rows are written with, keeping the comparison lexicographic-safe.
+pub fn expire_stale(
+    conn: &Connection,
+    ttl_seconds: i64,
+) -> Result<Vec<PendingQuestion>, rusqlite::Error> {
+    // A negative TTL pushes the cutoff into the future (used by tests to expire a
+    // just-written row deterministically).
+    let modifier = if ttl_seconds >= 0 {
+        format!("-{ttl_seconds} seconds")
+    } else {
+        format!("+{} seconds", -ttl_seconds)
+    };
+    conn.prepare(
+        "DELETE FROM pending_questions
+         WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+         RETURNING question_id, session_id, message_out_id, platform_id, channel_type,
+                   thread_id, title, options_json, created_at",
+    )?
+    .query_map(params![modifier], from_row)?
+    .collect()
 }
 
 fn from_row(row: &Row<'_>) -> Result<PendingQuestion, rusqlite::Error> {
@@ -118,6 +156,40 @@ mod tests {
             assert_eq!(taken.options, options);
             assert_eq!(taken.routing, routing);
             assert_eq!(take(conn, "q-1")?, None);
+            Ok(())
+        })
+        .expect("db ops");
+    }
+
+    #[test]
+    fn expire_stale_removes_only_old_questions() {
+        let db = CentralDb::open_in_memory().expect("open");
+        db.with(|conn| {
+            let group = agent_groups::create(conn, "Andy", "andy")?;
+            let session = sessions::create(conn, &group.id, None, None)?;
+            let routing = Routing {
+                channel_type: Some("web".to_owned()),
+                platform_id: Some("chat-1".to_owned()),
+                thread_id: None,
+            };
+            let options = vec!["yes".to_owned(), "no".to_owned()];
+            insert(
+                conn,
+                "q-fresh",
+                &session.id,
+                &MessageOutId::new("out-1"),
+                &routing,
+                "Fresh?",
+                &options,
+            )?;
+
+            // A one-year TTL expires nothing; a future cutoff (negative TTL)
+            // expires the just-written row.
+            assert!(expire_stale(conn, 365 * 24 * 3600)?.is_empty());
+            let expired = expire_stale(conn, -10)?;
+            assert_eq!(expired.len(), 1);
+            assert_eq!(expired[0].question_id, "q-fresh");
+            assert_eq!(get(conn, "q-fresh")?, None);
             Ok(())
         })
         .expect("db ops");

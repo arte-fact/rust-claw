@@ -5,9 +5,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::channels::{AdapterRegistry, Address, OutboundDelivery, OutboundFile};
-use crate::db::{CentralDb, DbError, sessions};
-use crate::protocol::content::{OutboundContent, Routing};
-use crate::protocol::ids::MessageOutId;
+use crate::db::{CentralDb, DbError, questions, sessions};
+use crate::protocol::content::{Operation, OutboundContent, Routing};
+use crate::protocol::ids::{MessageOutId, SessionId};
 use crate::session::{OutboundMessage, SessionDb, SessionStore, SessionStoreError};
 
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
@@ -88,17 +88,18 @@ impl Delivery {
             .await?
         };
         for message in due {
-            self.deliver_one(&db, &message).await?;
+            self.deliver_one(&session.id, &db, &message).await?;
         }
         Ok(())
     }
 
     async fn deliver_one(
         &self,
+        session_id: &SessionId,
         db: &Arc<SessionDb>,
         message: &OutboundMessage,
     ) -> Result<(), DeliveryError> {
-        match self.try_deliver(db, message).await {
+        match self.try_deliver(session_id, db, message).await {
             Ok(platform_message_id) => {
                 let db = db.clone();
                 let id = message.id.clone();
@@ -144,6 +145,7 @@ impl Delivery {
     /// One delivery attempt; every failure mode is a string reason for the retry counter.
     async fn try_deliver(
         &self,
+        session_id: &SessionId,
         db: &Arc<SessionDb>,
         message: &OutboundMessage,
     ) -> Result<Option<String>, String> {
@@ -159,6 +161,29 @@ impl Delivery {
         })?;
 
         let content = OutboundContent::parse(&message.content).map_err(|err| err.to_string())?;
+        if let Some(Operation::AskQuestion {
+            question_id,
+            title,
+            options,
+            ..
+        }) = &content.operation
+        {
+            let routing = Routing {
+                channel_type: Some(channel_type.clone()),
+                platform_id: Some(address.platform_id.clone()),
+                thread_id: address.thread_id.clone(),
+            };
+            self.register_question(
+                session_id,
+                &message.id,
+                &routing,
+                question_id,
+                title,
+                options,
+            )
+            .await?;
+        }
+
         let files = collect_outbox_files(db, message);
         let adapter = self
             .registry
@@ -175,6 +200,42 @@ impl Delivery {
             )
             .await
             .map_err(|err| err.to_string())
+    }
+
+    /// Records an open question in the channel-agnostic registry so an answer
+    /// (from any surface) can be validated and routed back to this session. Idempotent
+    /// across delivery retries (the `question_id` primary key dedupes).
+    async fn register_question(
+        &self,
+        session_id: &SessionId,
+        message_out_id: &MessageOutId,
+        routing: &Routing,
+        question_id: &str,
+        title: &str,
+        options: &[String],
+    ) -> Result<(), String> {
+        let central = self.central.clone();
+        let routing = routing.clone();
+        let session_id = session_id.clone();
+        let message_out_id = message_out_id.clone();
+        let question_id = question_id.to_owned();
+        let title = title.to_owned();
+        let options = options.to_vec();
+        blocking(move || {
+            central.with(|conn| {
+                questions::insert(
+                    conn,
+                    &question_id,
+                    &session_id,
+                    &message_out_id,
+                    &routing,
+                    &title,
+                    &options,
+                )
+            })
+        })
+        .await
+        .map_err(|err| err.to_string())
     }
 }
 
@@ -280,6 +341,7 @@ mod tests {
         delivery: Delivery,
         adapter: Arc<RecordingAdapter>,
         store: Arc<SessionStore>,
+        central: Arc<CentralDb>,
         session: sessions::Session,
         _tmp: tempfile::TempDir,
     }
@@ -301,9 +363,10 @@ mod tests {
         });
         let registry = Arc::new(AdapterRegistry::new(vec![adapter.clone()]));
         Fixture {
-            delivery: Delivery::new(central, store.clone(), registry),
+            delivery: Delivery::new(central.clone(), store.clone(), registry),
             adapter,
             store,
+            central,
             session,
             _tmp: tmp,
         }
@@ -342,6 +405,40 @@ mod tests {
         assert_eq!(seen.len(), 1, "delivered exactly once");
         assert_eq!(seen[0].0.platform_id, "chat-1");
         assert_eq!(seen[0].1.content.text.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn delivering_an_ask_question_registers_a_pending_question() {
+        let fix = fixture(0);
+        let db = session_db(&fix);
+        let content = OutboundContent {
+            text: Some("Deploy now? (ship / wait)".to_owned()),
+            files: Vec::new(),
+            operation: Some(Operation::AskQuestion {
+                question_id: "q-1".to_owned(),
+                title: "Deploy now?".to_owned(),
+                question: "Deploy now?".to_owned(),
+                options: vec!["ship".to_owned(), "wait".to_owned()],
+            }),
+            extra: serde_json::Map::new(),
+        };
+        let body = serde_json::to_string(&content).expect("json");
+        db.write_outbound(&NewOutboundMessage::chat(body, web_routing()))
+            .expect("write");
+
+        fix.delivery.drain_all().await.expect("drain");
+
+        let registered = fix
+            .central
+            .with(|conn| questions::get(conn, "q-1"))
+            .expect("query")
+            .expect("registered");
+        assert_eq!(registered.session_id, fix.session.id);
+        assert_eq!(registered.routing.platform_id.as_deref(), Some("chat-1"));
+        assert_eq!(
+            registered.options,
+            vec!["ship".to_owned(), "wait".to_owned()]
+        );
     }
 
     #[tokio::test]

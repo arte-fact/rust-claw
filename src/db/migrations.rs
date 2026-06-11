@@ -24,6 +24,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "003-tool-profile",
         up: tool_profile,
     },
+    Migration {
+        version: 4,
+        name: "004-question-cards",
+        up: question_cards,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -199,6 +204,18 @@ fn tool_profile(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// A web transcript row can be a question card: `kind='question'` carries the
+/// `question_id`, its `options`, and (once chosen) the `answer` for the collapsed
+/// render. `answer IS NULL` means the card is still open.
+fn question_cards(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "ALTER TABLE web_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+         ALTER TABLE web_messages ADD COLUMN question_id TEXT;
+         ALTER TABLE web_messages ADD COLUMN options_json TEXT;
+         ALTER TABLE web_messages ADD COLUMN answer TEXT;",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +238,7 @@ mod tests {
                 (1, "001-initial".to_owned()),
                 (2, "002-web-messages".to_owned()),
                 (3, "003-tool-profile".to_owned()),
+                (4, "004-question-cards".to_owned()),
             ]
         );
     }

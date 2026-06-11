@@ -57,6 +57,25 @@
     };
   };
 
+  // Question cards: clicking an option posts the answer. The collapsed card
+  // arrives back over SSE as a message_update, so we only disable the buttons
+  // optimistically and let the server drive the final render.
+  if (transcript) {
+    transcript.addEventListener('click', async (event) => {
+      const button = event.target.closest('.qcard-option');
+      if (!button) return;
+      const { question, option } = button.dataset;
+      const card = button.closest('.msg--question');
+      if (card) card.classList.add('qcard--pending');
+      const response = await fetch(`/api/questions/${question}/answer`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ option }),
+      });
+      if (!response.ok && card) card.classList.remove('qcard--pending');
+    });
+  }
+
   const composer = document.getElementById('composer');
   const input = document.getElementById('composer-input');
 

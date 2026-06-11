@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::protocol::content::{OutboundContent, Routing};
+use crate::protocol::content::{Operation, OutboundContent, Routing};
 use crate::protocol::entities::ToolProfile;
 use crate::session::{NewOutboundMessage, SessionDb};
 
@@ -287,9 +287,7 @@ fn dispatch_messaging(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
         PAUSE_TASK => task_action(db, &call.function.arguments, TaskAction::Pause),
         RESUME_TASK => task_action(db, &call.function.arguments, TaskAction::Resume),
         SEND_TO_AGENT => send_to_agent(db, &call.function.arguments),
-        ASK_USER_QUESTION => {
-            ToolOutcome::note("ask_user_question is not available yet; ask in a normal message.")
-        }
+        ASK_USER_QUESTION => ask_user_question(db, &call.function.arguments),
         other => ToolOutcome::note(format!("error: unknown tool {other}")),
     }
 }
@@ -328,6 +326,49 @@ fn send_message(db: &SessionDb, arguments: &str) -> ToolOutcome {
     };
     match send_text(db, &args.text) {
         Ok(()) => ToolOutcome::message("sent"),
+        Err(err) => ToolOutcome::note(format!("error: {err}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct AskQuestionArgs {
+    question: String,
+    options: Vec<String>,
+}
+
+/// Posts a multiple-choice question as an outbound `AskQuestion` operation. The
+/// run does not block: the question is delivered as a card, and the user's choice
+/// returns later as a normal inbound message that re-wakes the session.
+fn ask_user_question(db: &SessionDb, arguments: &str) -> ToolOutcome {
+    let args: AskQuestionArgs = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    if args.options.len() < 2 {
+        return ToolOutcome::note("error: ask_user_question needs at least two options");
+    }
+    let question_id = crate::db::generate_id("q");
+    // The transcript-visible text lets a later turn see what was asked (the card
+    // itself is rendered from the operation, not this text).
+    let content = OutboundContent {
+        text: Some(format!("{} ({})", args.question, args.options.join(" / "))),
+        files: Vec::new(),
+        operation: Some(Operation::AskQuestion {
+            question_id: question_id.clone(),
+            title: args.question.clone(),
+            question: args.question,
+            options: args.options,
+        }),
+        extra: serde_json::Map::new(),
+    };
+    let body = match serde_json::to_string(&content) {
+        Ok(body) => body,
+        Err(err) => return ToolOutcome::note(format!("error: {err}")),
+    };
+    match db.write_outbound(&NewOutboundMessage::chat(body, Routing::default())) {
+        Ok(_) => ToolOutcome::message(format!(
+            "asked the user (question {question_id}); their choice will arrive as a new message"
+        )),
         Err(err) => ToolOutcome::note(format!("error: {err}")),
     }
 }
@@ -665,15 +706,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_user_question_is_a_placeholder_for_now() {
+    async fn ask_user_question_writes_an_outbound_ask_operation() {
         let (_tmp, db, context) = fixture(ToolProfile::Chat);
         let outcome = dispatch(
             &db,
             &context,
-            &call(ASK_USER_QUESTION, r#"{"question":"?","options":[]}"#),
+            &call(
+                ASK_USER_QUESTION,
+                r#"{"question":"Deploy now?","options":["ship","wait"]}"#,
+            ),
+        )
+        .await;
+        assert!(outcome.produced_message);
+
+        let now = db.now_timestamp().expect("now");
+        let due = db.due_outbound(&now).expect("due");
+        assert_eq!(due.len(), 1);
+        let content = OutboundContent::parse(&due[0].content).expect("content");
+        // Transcript text is present so a later turn sees the question.
+        assert!(content.text.expect("text").contains("Deploy now?"));
+        let Some(Operation::AskQuestion {
+            question, options, ..
+        }) = content.operation
+        else {
+            panic!("expected an ask_question operation");
+        };
+        assert_eq!(question, "Deploy now?");
+        assert_eq!(options, vec!["ship".to_owned(), "wait".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_rejects_fewer_than_two_options() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(
+            &db,
+            &context,
+            &call(ASK_USER_QUESTION, r#"{"question":"?","options":["only"]}"#),
         )
         .await;
         assert!(!outcome.produced_message);
-        assert!(outcome.result.contains("not available yet"));
+        assert!(outcome.result.contains("at least two options"));
+        assert!(
+            db.due_outbound(&db.now_timestamp().expect("now"))
+                .expect("due")
+                .is_empty()
+        );
     }
 }

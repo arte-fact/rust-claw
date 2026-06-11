@@ -231,6 +231,49 @@ button:hover { background: var(--color-surface-raised); }
 }
 .msg-body :is(h1, h2, h3, h4) { color: var(--color-text-strong); font-size: var(--text-md); }
 
+/* ── question card: a flat panel, status-keyed left rule, inline choices ── */
+
+.qcard {
+  border: var(--border);
+  border-left: 2px solid var(--color-pending);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-3);
+}
+.qcard--answered .qcard { border-left-color: var(--color-ok); }
+
+.qcard-question { color: var(--color-text-strong); }
+
+.qcard-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.qcard-option {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+.qcard-option:hover { border-color: var(--color-accent); color: var(--color-text-strong); }
+.qcard-option:focus-visible { outline: var(--focus); }
+
+.qcard--pending { opacity: 0.5; pointer-events: none; }
+
+.qcard-answer {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  color: var(--color-text-strong);
+}
+.qcard-check { color: var(--color-ok); font-weight: 700; }
+
 /* ── composer ──────────────────────────────────────────────────────── */
 
 .composer {

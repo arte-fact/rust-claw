@@ -1,0 +1,19 @@
+<article class="msg msg--question{% if answer.is_some() %} qcard--answered{% endif %}" id="m{{ id }}">
+  <header class="msg-meta">
+    <span class="msg-sender">{{ sender }}</span>
+    <time class="msg-time">{{ time }}</time>
+  </header>
+  <div class="qcard">
+    <p class="qcard-question">{{ question_html|safe }}</p>
+    {% if let Some(chosen) = answer %}
+    <p class="qcard-answer"><span class="qcard-check">✓</span>{{ chosen }}</p>
+    {% else %}
+    <div class="qcard-options" data-question="{{ question_id }}">
+      {% for option in options %}
+      <button type="button" class="qcard-option" data-question="{{ question_id }}"
+              data-option="{{ option }}">{{ option }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</article>
