@@ -20,6 +20,11 @@
         </a>
       </li>
       {% endfor %}
+      <li>
+        <a class="chat-link{% if tasks_active %} chat-link--active{% endif %}" href="/admin/tasks">
+          <span class="chat-name">tasks</span>
+        </a>
+      </li>
     </ul>
     <a class="admin-back" href="/">← chats</a>
   </nav>

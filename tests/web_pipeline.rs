@@ -212,6 +212,99 @@ async fn admin_renders_resources_and_runs_commands_as_host() {
 }
 
 #[tokio::test]
+async fn admin_tasks_lists_and_controls_scheduled_tasks() {
+    use claw::db::{CentralDb, sessions};
+    use claw::session::SessionStore;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(tmp.path().to_path_buf());
+    let app = claw::app::build(&config).await.expect("build app");
+    let client = Client::login(app.http.clone()).await;
+
+    let chat = body_json(
+        client
+            .post_json("/api/chats", &serde_json::json!({"name": "Main"}))
+            .await,
+    )
+    .await;
+    let chat_id = chat["platform_id"].as_str().expect("id").to_owned();
+
+    // Spawn the session via a posted message, then wait for the echo reply.
+    client
+        .post_json(
+            &format!("/api/chats/{chat_id}/messages"),
+            &serde_json::json!({"text": "hi"}),
+        )
+        .await;
+    let messages_path = format!("/api/chats/{chat_id}/messages");
+    for _ in 0..100 {
+        if body_json(client.get(&messages_path).await)
+            .await
+            .as_array()
+            .expect("array")
+            .len()
+            >= 2
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Seed a recurring task (far-future first fire so the supervisor leaves it pending).
+    let (series, session_id, agent_group_id) = {
+        let central = CentralDb::open(&config.central_db_path()).expect("central");
+        let session = central
+            .with(|conn| Ok(sessions::list_active(conn)?.remove(0)))
+            .expect("session");
+        let store = SessionStore::new(config.sessions_dir());
+        let db = store
+            .open(&session.agent_group_id, &session.id)
+            .expect("open session db");
+        let series = db
+            .schedule_task(
+                "daily briefing",
+                Some("2999-01-01T00:00:00.000Z"),
+                Some("0 9 * * *"),
+            )
+            .expect("schedule");
+        (
+            series,
+            session.id.as_str().to_owned(),
+            session.agent_group_id.as_str().to_owned(),
+        )
+    };
+
+    let page = body_text(client.get("/admin/tasks").await).await;
+    assert!(page.contains("daily briefing"), "task prompt must list");
+    assert!(page.contains("0 9 * * *"), "cron schedule must list");
+    assert!(page.contains(&series));
+
+    let action = |verb: &str| {
+        format!(
+            "session_id={session_id}&agent_group_id={agent_group_id}&series={series}&action={verb}"
+        )
+    };
+
+    // Pause → the task shows as paused.
+    let paused = client
+        .post_form("/admin/tasks/action", &action("pause"))
+        .await;
+    assert_eq!(paused.status(), StatusCode::SEE_OTHER);
+    let page = body_text(client.get("/admin/tasks").await).await;
+    assert!(page.contains("paused"));
+
+    // Cancel → the task is gone.
+    let cancelled = client
+        .post_form("/admin/tasks/action", &action("cancel"))
+        .await;
+    assert_eq!(cancelled.status(), StatusCode::SEE_OTHER);
+    let page = body_text(client.get("/admin/tasks").await).await;
+    assert!(!page.contains(&series), "cancelled task must disappear");
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn unknown_chat_returns_404() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = test_config(tmp.path().to_path_buf());

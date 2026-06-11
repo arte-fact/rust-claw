@@ -20,6 +20,8 @@ const HISTORY_LIMIT: i64 = 200;
 pub enum ApiError {
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error(transparent)]
+    Session(#[from] crate::session::SessionStoreError),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("chat not found")]
@@ -40,7 +42,9 @@ impl IntoResponse for ApiError {
             Self::ChatNotFound | Self::QuestionClosed => StatusCode::NOT_FOUND,
             Self::NoAgentGroup => StatusCode::CONFLICT,
             Self::NotAnOption(_) => StatusCode::BAD_REQUEST,
-            Self::Db(_) | Self::Join(_) | Self::Channel(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Db(_) | Self::Session(_) | Self::Join(_) | Self::Channel(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         (status, self.to_string()).into_response()
     }

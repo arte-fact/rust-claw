@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw — tasks</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="logo">claw</div>
+    <ul class="chat-list">
+      {% for resource in resources %}
+      <li>
+        <a class="chat-link{% if resource.active %} chat-link--active{% endif %}"
+           href="/admin/{{ resource.name }}">
+          <span class="chat-name">{{ resource.name }}</span>
+        </a>
+      </li>
+      {% endfor %}
+      <li>
+        <a class="chat-link{% if tasks_active %} chat-link--active{% endif %}" href="/admin/tasks">
+          <span class="chat-name">tasks</span>
+        </a>
+      </li>
+    </ul>
+    <a class="admin-back" href="/">← chats</a>
+  </nav>
+  <main class="chat admin">
+    <header class="chat-header"><h1>tasks</h1></header>
+    <section class="admin-body">
+      {% if tasks.is_empty() %}
+      <p class="admin-empty">no scheduled tasks</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>group</th><th>series</th><th>prompt</th><th>schedule</th>
+              <th>next fire</th><th>status</th><th>actions</th></tr>
+        </thead>
+        <tbody>
+          {% for task in tasks %}
+          <tr>
+            <td>{{ task.group }}</td>
+            <td>{{ task.series }}</td>
+            <td>{{ task.prompt }}</td>
+            <td>{{ task.schedule }}</td>
+            <td>{{ task.next_fire }}</td>
+            <td>{% if task.paused %}paused{% else %}active{% endif %}</td>
+            <td class="task-actions">
+              <form method="post" action="/admin/tasks/action">
+                <input type="hidden" name="session_id" value="{{ task.session_id }}">
+                <input type="hidden" name="agent_group_id" value="{{ task.agent_group_id }}">
+                <input type="hidden" name="series" value="{{ task.series }}">
+                {% if task.paused %}
+                <button type="submit" name="action" value="resume">resume</button>
+                {% else %}
+                <button type="submit" name="action" value="pause">pause</button>
+                {% endif %}
+                <button type="submit" name="action" value="cancel" class="task-cancel">cancel</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+  </main>
+</div>
+</body>
+</html>

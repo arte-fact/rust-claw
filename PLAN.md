@@ -149,9 +149,12 @@ folder — see CLAUDE.md §"UI verification".**
       Linked from the chat sidebar. Tests: page renders forms/tables, create-runs-as-Host, Enum select,
       Hidden-shown, unknown-resource redirect. Screenshots: `admin-endpoints.png`, `admin-groups.png`
       (full dropdowns), `admin-roles.png`. (§9.2)
-- [ ] **7.3b Web admin — Tasks page.** Bespoke cross-session Tasks view: scan active sessions →
-      `list_scheduled_tasks`, next fire via the cron evaluator, pause/resume/cancel actions. Visual
-      verification: snapshot the Tasks page. (§9.2, §10)
+- [x] **7.3b Web admin — Tasks page.** `/admin/tasks` scans every active session's DB
+      (`list_scheduled_tasks`) and tabulates group/series/prompt/schedule/next-fire/status; next fire
+      is computed by the cron evaluator for recurring tasks and `process_after` for one-shots.
+      pause/resume/cancel post to `/admin/tasks/action`, which reopens the session DB and flips/cancels
+      the series. Shares the admin sidebar (a `tasks` nav entry). `WebState` gained the `SessionStore`
+      + timezone. Tests: list + pause + cancel round-trip. Screenshot: `admin-tasks.png`. (§9.2, §10)
 
 ## M8 — Packaging
 

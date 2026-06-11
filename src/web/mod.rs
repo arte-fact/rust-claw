@@ -4,6 +4,7 @@ pub mod auth;
 pub mod pages;
 pub mod render;
 pub mod sse;
+pub mod tasks;
 
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use axum::routing::get;
 use crate::channels::web::WebChannel;
 use crate::commands::Registry;
 use crate::db::CentralDb;
+use crate::session::SessionStore;
 use auth::AuthState;
 use sse::Hub;
 
@@ -25,6 +27,9 @@ pub struct WebState {
     pub hub: Hub,
     /// Used to execute a command once the operator approves it (M7.2).
     pub commands: Arc<Registry>,
+    /// Per-session DBs, for the Tasks page (M7.3b).
+    pub store: Arc<SessionStore>,
+    pub timezone: String,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -47,8 +52,10 @@ pub fn build_app(state: WebState) -> Router {
             axum::routing::post(api::answer_approval),
         )
         .route("/admin", get(admin::index))
-        .route("/admin/{resource}", get(admin::resource_page))
+        .route("/admin/tasks", get(tasks::page))
+        .route("/admin/tasks/action", axum::routing::post(tasks::action))
         .route("/admin/run", axum::routing::post(admin::run))
+        .route("/admin/{resource}", get(admin::resource_page))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -76,6 +83,10 @@ mod tests {
             auth: Arc::new(AuthState::new("secret-token".to_owned())),
             web_channel: Arc::new(WebChannel::new(central.clone(), hub.clone())),
             commands: Arc::new(Registry::new(central.clone())),
+            store: Arc::new(SessionStore::new(std::path::PathBuf::from(
+                "/tmp/claw-test",
+            ))),
+            timezone: "UTC".to_owned(),
             central,
             hub,
         })

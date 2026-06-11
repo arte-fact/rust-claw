@@ -26,19 +26,31 @@ fn resource_names(state: &WebState) -> Vec<&'static str> {
     seen
 }
 
+/// The admin sidebar entries, shared by the resource pages and the Tasks page.
+pub(super) fn resource_nav(state: &WebState, active: Option<&str>) -> Vec<NavItem> {
+    resource_names(state)
+        .iter()
+        .map(|name| NavItem {
+            name: (*name).to_owned(),
+            active: active == Some(name),
+        })
+        .collect()
+}
+
 #[derive(Template)]
 #[template(path = "admin.html")]
 struct AdminPage {
     resources: Vec<NavItem>,
+    tasks_active: bool,
     current: String,
     table: Option<Table>,
     forms: Vec<CommandForm>,
     error: Option<String>,
 }
 
-struct NavItem {
-    name: String,
-    active: bool,
+pub(super) struct NavItem {
+    pub name: String,
+    pub active: bool,
 }
 
 struct Table {
@@ -85,13 +97,8 @@ pub async fn resource_page(
     let forms = build_forms(&state, current, &endpoint_names);
 
     let page = AdminPage {
-        resources: resources
-            .iter()
-            .map(|name| NavItem {
-                name: (*name).to_owned(),
-                active: *name == current,
-            })
-            .collect(),
+        resources: resource_nav(&state, Some(current)),
+        tasks_active: false,
         current: current.to_owned(),
         table,
         forms,
@@ -266,7 +273,7 @@ fn urlencode(text: &str) -> String {
         .collect()
 }
 
-fn render<T: Template>(page: &T) -> Response {
+pub(super) fn render<T: Template>(page: &T) -> Response {
     match page.render() {
         Ok(body) => Html(body).into_response(),
         Err(error) => {

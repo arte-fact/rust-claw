@@ -124,6 +124,8 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
         web_channel,
         hub,
         commands,
+        store,
+        timezone: config.timezone.clone(),
     };
     Ok(App {
         http: build_app(state),

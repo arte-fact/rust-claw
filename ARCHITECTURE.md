@@ -580,9 +580,11 @@ field becomes a live dropdown of configured endpoints). `POST /admin/run` coerce
 HTTP (web admin), plus the in-process `admin` tool (agents, M6.4) — all under the same
 `cli_scope`/approval gates. Any command a fork registers appears in the web admin with zero UI work.
 
-The one bespoke admin view is **Tasks**: scheduled messages across all groups with cron
-expression, next fire (cron evaluator), last result, and pause/resume/cancel — the page you actually check
-daily.
+The one bespoke admin view is **Tasks** (M7.3b): `/admin/tasks` scans every active session's DB
+(`list_scheduled_tasks`) and tabulates group, series, prompt, schedule, next fire (recurring →
+cron evaluator, one-shot → `process_after`), and status, with pause/resume/cancel posting to
+`/admin/tasks/action` (which reopens the session DB and flips/cancels the series). The page you
+actually check daily.
 
 ---
 
