@@ -1,0 +1,19 @@
+<nav class="sidebar">
+  <div class="logo">claw</div>
+  <ul class="chat-list">
+    {% for resource in resources %}
+    <li>
+      <a class="chat-link{% if resource.active %} chat-link--active{% endif %}"
+         href="/admin/{{ resource.name }}">
+        <span class="chat-name">{{ resource.name }}</span>
+      </a>
+    </li>
+    {% endfor %}
+    <li>
+      <a class="chat-link{% if tasks_active %} chat-link--active{% endif %}" href="/admin/tasks">
+        <span class="chat-name">tasks</span>
+      </a>
+    </li>
+  </ul>
+  <a class="admin-back" href="/">← chats</a>
+</nav>

@@ -529,7 +529,10 @@ templates as full pages (single rendering path):
 **Visual system — dark Nord, Fira Code Nerd Font, flat.** Enforced by a single hand-written
 `claw.css`, **design-token oriented**: a tokens layer of CSS custom properties on `:root`, and
 component rules that consume *only* tokens — no literal colors, sizes, or font names anywhere
-below the tokens block.
+below the tokens block. *Flat* is taken literally (UX overhaul M10): one background, hairline
+dividers (`--hair`), no raised/filled panels or bubbles, transparent flat controls with an accent
+focus/hover, and status carried by colour + a 2px left-rule (questions, approvals, errors) rather
+than boxes.
 
 Two token tiers, primitives → semantic:
 
@@ -585,13 +588,19 @@ and mobile-first layout (responsive collapse only).
 ### 9.2 Admin = the command registry, rendered
 
 No bespoke admin screens. `CommandDef` args carry display metadata (label, type, enum options,
-required), and the admin section generates itself from the registry (M7.3a): `/admin/{resource}`
-renders a table from the resource's no-required-args `list` command plus a form per mutating
-command, with `ArgKind` driving inputs (Text→input, Bool→checkbox, Enum→`<select>`; the `endpoint`
-field becomes a live dropdown of configured endpoints). `POST /admin/run` coerces the form by each
-`ArgSpec` and dispatches as `Host`. One dispatch path, two live transports — unix socket (CLI) and
-HTTP (web admin), plus the in-process `admin` tool (agents, M6.4) — all under the same
-`cli_scope`/approval gates. Any command a fork registers appears in the web admin with zero UI work.
+required), and the admin section generates itself from the registry (M7.3a; UX overhaul M10):
+`/admin/{resource}` shows **inline-editable rows** — each item from the no-required-args `list`
+command becomes a row whose fields are the matching `<resource>-update` form, prefilled from the
+row (the identity field readonly), with a `save` and — where a `<resource>-delete` exists — a
+`delete` button (one `<form>`, two submit buttons carrying the command). A `<resource>-create`
+renders as an "add" row; anything left over (e.g. `roles-grant`/`-revoke`) renders as a standalone
+form; resources with no `update` render read-only cells (e.g. `wirings`). `ArgKind` drives inputs
+(Text→input, Bool→checkbox, Enum→`<select>`; `endpoint`→a live dropdown of configured endpoints).
+The field grid is a fluid `auto-fit` grid, so rows reflow on narrow screens (the sidebar collapses
+to a top bar). `POST /admin/run` coerces the submitted form by each `ArgSpec` and dispatches as
+`Host`. One dispatch path, two live transports — unix socket (CLI) and HTTP (web admin), plus the
+in-process `admin` tool (agents, M6.4) — all under the same `cli_scope`/approval gates. Any command
+a fork registers appears in the web admin with zero UI work.
 
 **Creating agents** (`groups-create`, M9.1) is just another registry command — `Access::Approval`,
 so the operator (Host) runs it directly but an agent spawning a sub-agent is held for owner approval

@@ -9,25 +9,7 @@
 </head>
 <body>
 <div class="app">
-  <nav class="sidebar">
-    <div class="logo">claw</div>
-    <ul class="chat-list">
-      {% for resource in resources %}
-      <li>
-        <a class="chat-link{% if resource.active %} chat-link--active{% endif %}"
-           href="/admin/{{ resource.name }}">
-          <span class="chat-name">{{ resource.name }}</span>
-        </a>
-      </li>
-      {% endfor %}
-      <li>
-        <a class="chat-link{% if tasks_active %} chat-link--active{% endif %}" href="/admin/tasks">
-          <span class="chat-name">tasks</span>
-        </a>
-      </li>
-    </ul>
-    <a class="admin-back" href="/">← chats</a>
-  </nav>
+  {% include "admin-nav.html" %}
   <main class="chat admin">
     <header class="chat-header"><h1>{{ current }}</h1></header>
     <section class="admin-body">
@@ -35,44 +17,67 @@
       <p class="admin-error">{{ message }}</p>
       {% endif %}
 
-      {% if let Some(table) = table %}
-      <table class="admin-table">
-        <thead>
-          <tr>{% for column in table.columns %}<th>{{ column }}</th>{% endfor %}</tr>
-        </thead>
-        <tbody>
-          {% for row in table.rows %}
-          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% if table.rows.is_empty() %}<p class="admin-empty">no rows</p>{% endif %}
+      {% if !rows.is_empty() %}
+      <section class="admin-section">
+        {% for row in rows %}
+        {% if let Some(form) = row.form %}
+        <form class="row" method="post" action="/admin/run">
+          <div class="row-title">{{ row.title }}</div>
+          <div class="row-fields">
+            {% for field in form.fields %}{% include "admin-field.html" %}{% endfor %}
+          </div>
+          <div class="row-actions">
+            <button class="btn-primary" type="submit" name="command" value="{{ form.command }}">{{ form.label }}</button>
+            {% if let Some(delete) = form.delete_command %}
+            <button class="btn-danger" type="submit" name="command" value="{{ delete }}">delete</button>
+            {% endif %}
+          </div>
+        </form>
+        {% else %}
+        <div class="row">
+          <div class="row-title">{{ row.title }}</div>
+          <div class="row-cells">
+            {% for cell in row.cells %}
+            <span class="row-cell"><b>{{ cell.label }}</b> {{ cell.value }}</span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if let Some(form) = new_form %}
+      <section class="admin-section">
+        <h2>add {{ current }}</h2>
+        <form class="row row--new" method="post" action="/admin/run">
+          <div class="row-fields">
+            {% for field in form.fields %}{% include "admin-field.html" %}{% endfor %}
+          </div>
+          <div class="row-actions">
+            <button class="btn-primary" type="submit" name="command" value="{{ form.command }}">add</button>
+          </div>
+        </form>
+      </section>
       {% endif %}
 
       {% for form in forms %}
-      <form class="admin-form" method="post" action="/admin/run">
-        <h2>{{ form.command }}</h2>
-        <p class="admin-form-summary">{{ form.summary }}</p>
-        <input type="hidden" name="command" value="{{ form.command }}">
-        {% for field in form.fields %}
-        <label class="admin-field">
-          <span class="admin-field-label">{{ field.label }}{% if field.required %} *{% endif %}</span>
-          {% if field.input == "bool" %}
-          <input type="checkbox" name="{{ field.name }}">
-          {% else if field.input == "select" %}
-          <select name="{{ field.name }}"{% if field.required %} required{% endif %}>
-            <option value="">—</option>
-            {% for option in field.options %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
-          </select>
-          {% else %}
-          <input type="text" name="{{ field.name }}"{% if field.required %} required{% endif %}
-                 autocomplete="off">
-          {% endif %}
-        </label>
-        {% endfor %}
-        <button type="submit">{{ form.command }}</button>
-      </form>
+      <section class="admin-section">
+        <h2>{{ form.label }}</h2>
+        <form class="row row--new" method="post" action="/admin/run">
+          <div class="row-fields">
+            {% for field in form.fields %}{% include "admin-field.html" %}{% endfor %}
+          </div>
+          <div class="row-actions">
+            <button class="btn-primary" type="submit" name="command" value="{{ form.command }}">run</button>
+          </div>
+        </form>
+      </section>
       {% endfor %}
+
+      {% if rows.is_empty() && new_form.is_none() && forms.is_empty() %}
+      <p class="admin-empty">nothing to configure here.</p>
+      {% endif %}
     </section>
   </main>
 </div>

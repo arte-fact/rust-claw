@@ -1,0 +1,17 @@
+<label class="field">
+  <span>{{ field.label }}{% if field.required %} *{% endif %}</span>
+  {% if field.input == "bool" %}
+  <input type="checkbox" name="{{ field.name }}"{% if field.checked %} checked{% endif %}>
+  {% else if field.input == "select" %}
+  <select name="{{ field.name }}"{% if field.required %} required{% endif %}>
+    <option value=""{% if field.value.is_empty() %} selected{% endif %}>—</option>
+    {% for option in field.options %}
+    <option value="{{ option }}"{% if option.as_str() == field.value.as_str() %} selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  {% else %}
+  <input type="text" name="{{ field.name }}" value="{{ field.value }}"
+         {% if field.required %}required{% endif %}{% if field.readonly %} readonly{% endif %}
+         autocomplete="off">
+  {% endif %}
+</label>

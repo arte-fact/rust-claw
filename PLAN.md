@@ -193,6 +193,18 @@ folder — see CLAUDE.md §"UI verification".**
       "archived", restores). Screenshot: refreshed `chat.png` (multi-chat list + archived section +
       archive button).
 
+## M10 — UX overhaul
+
+- [x] **10.1 Flat redesign + editable admin.** Global flat pass on `claw.css`: one background,
+      hairline dividers (`--hair`), transparent flat controls (accent focus/hover), no filled
+      panels/bubbles, status as colour + a 2px left-rule (cards/errors); a `@media` breakpoint
+      collapses the sidebar to a top bar. The admin becomes **responsive inline-editable lists**:
+      each `<resource>-list` item is a prefilled `<resource>-update` form-row (identity readonly) with
+      save + (where it exists) delete as two submit buttons on one form; `<resource>-create` is an
+      "add" row; leftover commands (roles grant/revoke) are standalone forms; no-`update` resources
+      (wirings) render read-only cells. Shared `admin-nav.html` / `admin-field.html` partials. All
+      eight `screenshots/` refreshed; existing admin tests still pass (same command values/selects).
+
 Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
 the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for
 external agents; cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

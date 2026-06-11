@@ -7,7 +7,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::commands::registry::ArgKind;
+use crate::commands::registry::{ArgKind, ArgSpec, CommandDef};
 use crate::commands::{CallerContext, Dispatcher};
 use crate::db::endpoints;
 use crate::protocol::frame::RequestFrame;
@@ -43,9 +43,13 @@ struct AdminPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
     current: String,
-    table: Option<Table>,
-    forms: Vec<CommandForm>,
     error: Option<String>,
+    /// Existing items as inline-editable (or read-only) rows.
+    rows: Vec<EditRow>,
+    /// The "add" form, when the resource has a `<resource>-create`.
+    new_form: Option<EditForm>,
+    /// Standalone mutating commands that aren't lifecycle CRUD (e.g. roles grant/revoke).
+    forms: Vec<EditForm>,
 }
 
 pub(super) struct NavItem {
@@ -53,15 +57,23 @@ pub(super) struct NavItem {
     pub active: bool,
 }
 
-struct Table {
-    columns: Vec<String>,
-    rows: Vec<Vec<String>>,
+struct EditRow {
+    title: String,
+    /// Some → an inline update form; None → a read-only row rendered as `cells`.
+    form: Option<EditForm>,
+    cells: Vec<Cell>,
 }
 
-struct CommandForm {
+struct EditForm {
     command: String,
-    summary: String,
+    label: String,
+    delete_command: Option<String>,
     fields: Vec<Field>,
+}
+
+struct Cell {
+    label: String,
+    value: String,
 }
 
 struct Field {
@@ -71,6 +83,9 @@ struct Field {
     input: &'static str,
     options: Vec<String>,
     required: bool,
+    value: String,
+    checked: bool,
+    readonly: bool,
 }
 
 #[derive(Deserialize)]
@@ -91,89 +106,154 @@ pub async fn resource_page(
     let Some(current) = resources.iter().find(|name| **name == resource).copied() else {
         return Ok(Redirect::to("/admin/endpoints").into_response());
     };
-
     let endpoint_names = endpoint_names(&state).await?;
-    let table = build_table(&state, current).await;
-    let forms = build_forms(&state, current, &endpoint_names);
+    let list_items = run_list(&state, current).await;
+
+    let update = state.commands.get(&format!("{current}-update"));
+    let delete = state.commands.get(&format!("{current}-delete"));
+    let create = state.commands.get(&format!("{current}-create"));
+    let identity = update.or(delete).and_then(identity_arg);
+    let delete_command = delete.map(|def| def.name.to_owned());
+
+    let rows = list_items
+        .iter()
+        .map(|item| {
+            build_row(
+                item,
+                update,
+                delete_command.as_deref(),
+                identity,
+                &endpoint_names,
+            )
+        })
+        .collect();
+    let new_form = create.map(|def| blank_form(def, &endpoint_names));
+    let forms = state
+        .commands
+        .commands()
+        .filter(|command| command.resource == current && !is_lifecycle(command.name))
+        .map(|def| blank_form(def, &endpoint_names))
+        .collect();
 
     let page = AdminPage {
         resources: resource_nav(&state, Some(current)),
         tasks_active: false,
         current: current.to_owned(),
-        table,
-        forms,
         error: flash.error,
+        rows,
+        new_form,
+        forms,
     };
     Ok(render(&page))
 }
 
-/// The list table, when the resource has a no-required-args `<resource>-list`.
-async fn build_table(state: &WebState, resource: &str) -> Option<Table> {
-    let list_command = format!("{resource}-list");
-    let def = state.commands.get(&list_command)?;
+/// Runs `<resource>-list` (as Host) when it takes no required args; returns its rows.
+async fn run_list(state: &WebState, resource: &str) -> Vec<Value> {
+    let list = format!("{resource}-list");
+    let Some(def) = state.commands.get(&list) else {
+        return Vec::new();
+    };
     if def.args.iter().any(|arg| arg.required) {
-        return None;
+        return Vec::new();
     }
-    let response = state
+    state
         .commands
-        .dispatch(request(&list_command, Map::new()), CallerContext::Host)
-        .await;
-    let rows = response.data?;
-    Some(table_from_rows(&rows))
+        .dispatch(request(&list, Map::new()), CallerContext::Host)
+        .await
+        .data
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
 }
 
-fn table_from_rows(rows: &Value) -> Table {
-    let items = rows.as_array().cloned().unwrap_or_default();
-    let mut columns: Vec<String> = Vec::new();
-    for item in &items {
-        if let Some(object) = item.as_object() {
-            for key in object.keys() {
-                if !columns.contains(key) {
-                    columns.push(key.clone());
-                }
+fn build_row(
+    item: &Value,
+    update: Option<&CommandDef>,
+    delete_command: Option<&str>,
+    identity: Option<&str>,
+    endpoint_names: &[String],
+) -> EditRow {
+    let title = identity
+        .and_then(|key| item.get(key))
+        .map(value_text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| item.as_object()?.values().next().map(value_text))
+        .unwrap_or_default();
+
+    match update {
+        Some(def) => {
+            let fields = def
+                .args
+                .iter()
+                .map(|arg| {
+                    let value = item.get(arg.name).map(value_text).unwrap_or_default();
+                    field(arg, endpoint_names, &value, Some(arg.name) == identity)
+                })
+                .collect();
+            EditRow {
+                title,
+                form: Some(EditForm {
+                    command: def.name.to_owned(),
+                    label: "save".to_owned(),
+                    delete_command: delete_command.map(str::to_owned),
+                    fields,
+                }),
+                cells: Vec::new(),
+            }
+        }
+        None => {
+            let cells = item
+                .as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .map(|(key, value)| Cell {
+                            label: key.clone(),
+                            value: value_text(value),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            EditRow {
+                title,
+                form: None,
+                cells,
             }
         }
     }
-    let rows = items
-        .iter()
-        .map(|item| {
-            columns
-                .iter()
-                .map(|column| cell_text(item.get(column)))
-                .collect()
-        })
-        .collect();
-    Table { columns, rows }
 }
 
-fn cell_text(value: Option<&Value>) -> String {
-    match value {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => other.to_string(),
+fn blank_form(def: &CommandDef, endpoint_names: &[String]) -> EditForm {
+    EditForm {
+        command: def.name.to_owned(),
+        label: def.name.to_owned(),
+        delete_command: None,
+        fields: def
+            .args
+            .iter()
+            .map(|arg| field(arg, endpoint_names, "", false))
+            .collect(),
     }
 }
 
-/// One form per mutating command (everything but reads — `-list` / `-get`).
-fn build_forms(state: &WebState, resource: &str, endpoint_names: &[String]) -> Vec<CommandForm> {
-    state
-        .commands
-        .commands()
-        .filter(|command| command.resource == resource)
-        .filter(|command| !command.name.ends_with("-list") && !command.name.ends_with("-get"))
-        .map(|command| CommandForm {
-            command: command.name.to_owned(),
-            summary: command.summary.to_owned(),
-            fields: command
-                .args
-                .iter()
-                .map(|arg| field(arg, endpoint_names))
-                .collect(),
-        })
-        .collect()
+fn identity_arg(def: &CommandDef) -> Option<&'static str> {
+    def.args.iter().find(|arg| arg.required).map(|arg| arg.name)
 }
 
-fn field(arg: &crate::commands::ArgSpec, endpoint_names: &[String]) -> Field {
+fn is_lifecycle(name: &str) -> bool {
+    ["-list", "-get", "-create", "-update", "-delete"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn field(arg: &ArgSpec, endpoint_names: &[String], value: &str, readonly: bool) -> Field {
     let (input, options) = if arg.name == "endpoint" {
         ("select", endpoint_names.to_vec())
     } else {
@@ -192,6 +272,9 @@ fn field(arg: &crate::commands::ArgSpec, endpoint_names: &[String]) -> Field {
         input,
         options,
         required: arg.required,
+        value: value.to_owned(),
+        checked: value == "true",
+        readonly,
     }
 }
 
