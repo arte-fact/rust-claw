@@ -125,7 +125,8 @@ rust-claw/
         client.rs         #     /chat/completions client with tool-calling
         context.rs        #     transcript → token-budgeted message window
         tools.rs          #     messaging tools (send_message, schedule_task, send_to_agent)
-        exec.rs           #     coding tools: bash, read, write, edit (coder profile, M4.5/4.6)
+        exec.rs           #     bash tool (workspace cwd, timeout, output truncation)
+        files.rs          #     read / write / edit (coder profile)
       echo.rs             #   no-network test provider
     delivery.rs           # messages_out polling, system actions, channel dispatch
     sweep.rs              # 60s: due schedules → enqueue, recurrence advance, watchdog

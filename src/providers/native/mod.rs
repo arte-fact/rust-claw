@@ -1,6 +1,7 @@
 pub mod client;
 pub mod context;
 pub mod exec;
+pub mod files;
 pub mod tools;
 
 use std::path::Path;

@@ -79,7 +79,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **4.5 Bash tool + tool profiles.** `bash` tool for the native loop: `tokio::process`, cwd =
       group workspace, timeout, head+tail output truncation, exit code in the result. Per-group
       `tool_profile` column (`chat` | `coder`) gating the tool surface; migration. (§8.5)
-- [ ] **4.6 File tools.** `read` (line numbers/limits), `write` (create/overwrite), `edit`
+- [x] **4.6 File tools.** `read` (line numbers/limits), `write` (create/overwrite), `edit`
       (exact-string replace, unique match required) — workspace-rooted path resolution. Table
       tests. (§8.5)
 - [ ] **4.7 Coding-group end-to-end.** Integration test: coder-profile group, mock LLM scripted

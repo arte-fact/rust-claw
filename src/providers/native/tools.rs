@@ -10,13 +10,16 @@ use crate::protocol::message::MessageKind;
 use crate::session::{NewOutboundMessage, SessionDb};
 
 use super::client::{ToolCall, ToolDefinition};
-use super::exec;
+use super::{exec, files};
 
 pub const SEND_MESSAGE: &str = "send_message";
 pub const SCHEDULE_TASK: &str = "schedule_task";
 pub const SEND_TO_AGENT: &str = "send_to_agent";
 pub const ASK_USER_QUESTION: &str = "ask_user_question";
 pub const BASH: &str = "bash";
+pub const READ: &str = "read";
+pub const WRITE: &str = "write";
+pub const EDIT: &str = "edit";
 
 /// What a tool call may touch: the group workspace, gated by the group's profile.
 #[derive(Debug, Clone)]
@@ -30,7 +33,14 @@ pub struct ToolContext {
 pub fn definitions(profile: ToolProfile) -> Vec<ToolDefinition> {
     let mut tools = messaging_definitions();
     if profile == ToolProfile::Coder {
-        tools.push(ToolDefinition::function(
+        tools.extend(coder_definitions());
+    }
+    tools
+}
+
+fn coder_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::function(
             BASH,
             "Run a bash command in the agent workspace. Returns exit code and output.",
             json!({
@@ -40,9 +50,46 @@ pub fn definitions(profile: ToolProfile) -> Vec<ToolDefinition> {
                 },
                 "required": ["command"]
             }),
-        ));
-    }
-    tools
+        ),
+        ToolDefinition::function(
+            READ,
+            "Read a file with line numbers. Paths are relative to the workspace.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "description": "1-based first line to show." },
+                    "limit": { "type": "integer", "description": "Max lines to show (default 2000)." }
+                },
+                "required": ["path"]
+            }),
+        ),
+        ToolDefinition::function(
+            WRITE,
+            "Create or overwrite a file. Parent directories are created.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+        ),
+        ToolDefinition::function(
+            EDIT,
+            "Replace an exact string in a file. old_string must match exactly once.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        ),
+    ]
 }
 
 fn messaging_definitions() -> Vec<ToolDefinition> {
@@ -131,8 +178,22 @@ impl ToolOutcome {
 /// model) rather than failing the whole turn. Profile gating is enforced here
 /// too — a model hallucinating `bash` in a chat group gets a refusal result.
 pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCall) -> ToolOutcome {
-    match call.function.name.as_str() {
+    let name = call.function.name.as_str();
+    let coder_only = matches!(name, BASH | READ | WRITE | EDIT);
+    if coder_only && context.profile != ToolProfile::Coder {
+        return ToolOutcome::note(format!(
+            "error: {name} is not available in this agent group"
+        ));
+    }
+    match name {
         BASH => bash(context, &call.function.arguments).await,
+        READ | WRITE | EDIT => {
+            let workspace = context.workspace.clone();
+            let call = call.clone();
+            tokio::task::spawn_blocking(move || dispatch_files(&workspace, &call))
+                .await
+                .unwrap_or_else(|err| ToolOutcome::note(format!("error: tool task failed: {err}")))
+        }
         _ => {
             let db = db.clone();
             let call = call.clone();
@@ -140,6 +201,45 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
                 .await
                 .unwrap_or_else(|err| ToolOutcome::note(format!("error: tool task failed: {err}")))
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct ReadArgs {
+    path: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct WriteArgs {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct EditArgs {
+    path: String,
+    old_string: String,
+    new_string: String,
+}
+
+fn dispatch_files(workspace: &std::path::Path, call: &ToolCall) -> ToolOutcome {
+    let arguments = &call.function.arguments;
+    let result = match call.function.name.as_str() {
+        READ => serde_json::from_str::<ReadArgs>(arguments)
+            .map(|args| files::read(workspace, &args.path, args.offset, args.limit)),
+        WRITE => serde_json::from_str::<WriteArgs>(arguments)
+            .map(|args| files::write(workspace, &args.path, &args.content)),
+        EDIT => serde_json::from_str::<EditArgs>(arguments)
+            .map(|args| files::edit(workspace, &args.path, &args.old_string, &args.new_string)),
+        other => return ToolOutcome::note(format!("error: unknown file tool {other}")),
+    };
+    match result {
+        Ok(rendered) => ToolOutcome::note(rendered),
+        Err(err) => ToolOutcome::note(format!("error: bad arguments: {err}")),
     }
 }
 
@@ -161,9 +261,6 @@ struct BashArgs {
 }
 
 async fn bash(context: &ToolContext, arguments: &str) -> ToolOutcome {
-    if context.profile != ToolProfile::Coder {
-        return ToolOutcome::note("error: bash is not available in this agent group");
-    }
     let args: BashArgs = match serde_json::from_str(arguments) {
         Ok(args) => args,
         Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
@@ -285,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn coder_profile_adds_bash_to_the_chat_surface() {
+    fn coder_profile_adds_execution_tools_to_the_chat_surface() {
         let chat: Vec<&str> = definitions(ToolProfile::Chat)
             .iter()
             .map(|tool| tool.function.name)
@@ -294,9 +391,57 @@ mod tests {
             .iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert!(!chat.contains(&BASH));
-        assert!(coder.contains(&BASH));
+        for tool in [BASH, READ, WRITE, EDIT] {
+            assert!(!chat.contains(&tool), "{tool} must not be in chat");
+            assert!(coder.contains(&tool), "{tool} must be in coder");
+        }
         assert!(coder.contains(&SEND_MESSAGE), "messaging tools stay");
+    }
+
+    #[tokio::test]
+    async fn file_tools_round_trip_through_dispatch() {
+        let (tmp, db, context) = fixture(ToolProfile::Coder);
+
+        let written = dispatch(
+            &db,
+            &context,
+            &call(WRITE, r#"{"path":"notes.txt","content":"alpha\nbeta"}"#),
+        )
+        .await;
+        assert_eq!(written.result, "wrote 10 bytes to notes.txt");
+
+        let edited = dispatch(
+            &db,
+            &context,
+            &call(
+                EDIT,
+                r#"{"path":"notes.txt","old_string":"alpha","new_string":"ALPHA"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(edited.result, "edited notes.txt");
+
+        let read_back = dispatch(&db, &context, &call(READ, r#"{"path":"notes.txt"}"#)).await;
+        assert_eq!(read_back.result, "     1\tALPHA\n     2\tbeta");
+        assert!(tmp.path().join("notes.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn execution_tools_are_refused_for_chat_groups() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        for (name, arguments) in [
+            (BASH, r#"{"command":"echo hi"}"#),
+            (READ, r#"{"path":"x"}"#),
+            (WRITE, r#"{"path":"x","content":"y"}"#),
+            (EDIT, r#"{"path":"x","old_string":"a","new_string":"b"}"#),
+        ] {
+            let outcome = dispatch(&db, &context, &call(name, arguments)).await;
+            assert!(
+                outcome.result.contains("not available"),
+                "{name}: {}",
+                outcome.result
+            );
+        }
     }
 
     #[tokio::test]
