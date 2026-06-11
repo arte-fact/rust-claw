@@ -73,7 +73,7 @@ folder — see CLAUDE.md §"UI verification".**
 - [x] **4.1 pi RPC client.** Spawn `pi --mode rpc`, JSONL framing, command/response correlation,
       event translation → `ProviderEvent`, abort → SIGTERM → SIGKILL ladder. Tests against a
       stub "fake pi" script speaking the protocol. (§8.4)
-- [ ] **4.2 Formatter.** XML formatting by kind (chat/task/webhook/system), quoted messages,
+- [x] **4.2 Formatter.** XML formatting by kind (chat/task/webhook/system), quoted messages,
       attachment paths, timezone header (jiff), routing stripped. Golden tests. (§8.2)
 - [ ] **4.3 Tool extension.** `pi-extension/claw-tools.ts`: `send_message`, `send_file` (outbox
       convention), odd-seq assignment via `node:sqlite`; Node test harness against the same
