@@ -70,7 +70,7 @@ folder — see CLAUDE.md §"UI verification".**
 
 ## M4 — pi provider
 
-- [ ] **4.1 pi RPC client.** Spawn `pi --mode rpc`, JSONL framing, command/response correlation,
+- [x] **4.1 pi RPC client.** Spawn `pi --mode rpc`, JSONL framing, command/response correlation,
       event translation → `ProviderEvent`, abort → SIGTERM → SIGKILL ladder. Tests against a
       stub "fake pi" script speaking the protocol. (§8.4)
 - [ ] **4.2 Formatter.** XML formatting by kind (chat/task/webhook/system), quoted messages,
