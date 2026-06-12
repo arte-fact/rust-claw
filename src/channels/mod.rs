@@ -13,8 +13,14 @@ use crate::router::InboundEvent;
 
 /// Internal pseudo-channel for agent-to-agent messages (`send_to_agent`). These
 /// never reach a `ChannelAdapter`; delivery injects them into the target agent's
-/// session instead (§8.6).
+/// session instead (§8.6). `platform_id` = the target agent group.
 pub const AGENT_CHANNEL_TYPE: &str = "agent";
+
+/// The return leg of a delegation: a worker's reply routed back to the exact
+/// originating session so the concierge can relay it to the user (M15).
+/// `platform_id` = the originating session id. A distinct channel (not a
+/// `thread_id`) so a forward's routing can't accidentally inherit it.
+pub const AGENT_RETURN_CHANNEL_TYPE: &str = "agent-return";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {

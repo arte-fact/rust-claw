@@ -331,6 +331,26 @@ SSE; the error card is a `web_messages` row (the web presentation ledger the age
       `RunNotifier` supervisor test (busy→failed→idle). Verified end-to-end (live error card +
       persisted, session `messages_in/out` untouched). `screenshots/chat.png`.
 
+## M15 — Agent-to-agent delegation round-trip
+
+A bug fix earlier made `send_to_agent` deliver into the target group's session, but the worker's
+reply dead-ended (routed to a `messaging_group_id=NULL` session, not the user's chat). This completes
+the **concierge-relay** round-trip so a worker's result reaches the user.
+
+- [x] **15.1 Delegation return path via a distinct `agent-return` channel.** Two internal channels:
+      **`agent`** (delegation, `platform_id`=target group) and **`agent-return`** (worker reply,
+      `platform_id`=originating session id) — distinct so a forward's routing can't inherit a return
+      `thread_id` via `resolve_address`'s field-by-field fallback. `delivery::delegate_to_agent`
+      resolves/creates the worker session **namespaced by source** (`find_active(target, None,
+      Some(source.id))`), writes the inbound (`source_session_id=source.id`), and sets the worker
+      session's default routing to `{agent-return, platform_id:source.id}`. `return_to_session`
+      resolves the originating session by id (`sessions::get`), writes the inbound there (trigger),
+      and leaves its default routing (the user's chat) intact. Net effect: worker reply (empty
+      routing → worker default = return address) → originating session → concierge re-runs → replies
+      to the user; multi-hop relays up the chain. No new tables/adapters; the long-reserved
+      `source_session_id` is now populated. Tests: forward (namespacing + return routing), return
+      (lands in the user session, preserves its routing), full round-trip. ARCHITECTURE §10 updated.
+
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);
 cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

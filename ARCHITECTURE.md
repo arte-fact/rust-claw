@@ -645,9 +645,11 @@ These port from the first draft with containers subtracted:
   pi-era host-side command gate is N/A — the native loop has no slash commands; see M6.3.)
 - **Delivery** (`delivery.rs`): poll `messages_out` (1s while a run is live for that session, 60s
   sweep over all active sessions), filter against `delivered`, dispatch: `system` → action registry;
-  `channel_type='agent'` → permission check + write into target session + enqueue; otherwise →
-  destination permission check + `adapter.deliver()` + ledger + outbox cleanup. 3 attempts →
-  failed.
+  `channel_type='agent'` (delegation, `platform_id`=target group) → write into a per-source worker
+  session + set its return routing + enqueue; `channel_type='agent-return'` (worker reply,
+  `platform_id`=originating session id) → write into that exact session + enqueue, so the concierge
+  relays the result to the user (M15); otherwise → destination permission check + `adapter.deliver()`
+  + ledger + outbox cleanup. 3 attempts → failed.
 - **Sweep** (`sweep.rs`): due `process_after` rows → enqueue; due `deliver_after` → deliver;
   recurrence advance computed grid-aligned via the in-house jiff cron evaluator, same `series_id`;
   run watchdog (§8.2).

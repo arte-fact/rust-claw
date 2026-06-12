@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::channels::{
-    AGENT_CHANNEL_TYPE, AdapterRegistry, Address, OutboundDelivery, OutboundFile,
+    AGENT_CHANNEL_TYPE, AGENT_RETURN_CHANNEL_TYPE, AdapterRegistry, Address, OutboundDelivery,
+    OutboundFile,
 };
 use crate::db::{CentralDb, DbError, agent_groups, approvals, questions, sessions};
 use crate::protocol::content::{ChatContent, Operation, OutboundContent, Routing};
@@ -176,10 +177,17 @@ impl Delivery {
 
         let content = OutboundContent::parse(&message.content).map_err(|err| err.to_string())?;
 
-        // Agent-to-agent: not an external channel — inject into the target agent's
-        // session instead of looking up an adapter (which would never exist).
+        // Agent-to-agent: not an external channel — inject into another session
+        // instead of looking up an adapter (which would never exist). A delegation
+        // ("agent") goes to the target group; a worker's reply ("agent-return")
+        // goes back to the originating session so the concierge can relay it (M15).
         if channel_type == AGENT_CHANNEL_TYPE {
-            self.deliver_to_agent(session, &address.platform_id, &content)
+            self.delegate_to_agent(session, &address.platform_id, &content)
+                .await?;
+            return Ok(None);
+        }
+        if channel_type == AGENT_RETURN_CHANNEL_TYPE {
+            self.return_to_session(session, &address.platform_id, &content)
                 .await?;
             return Ok(None);
         }
@@ -310,7 +318,7 @@ impl Delivery {
     /// target group's session (creating one if needed) and enqueuing a run — the
     /// same machinery the router uses, so "everything is a message" still holds. The
     /// inbound's routing points back at the sender so the target can reply (§8.6).
-    async fn deliver_to_agent(
+    async fn delegate_to_agent(
         &self,
         source: &sessions::Session,
         target_group: &str,
@@ -320,6 +328,7 @@ impl Delivery {
         let store = self.store.clone();
         let target_group = AgentGroupId::new(target_group.to_owned());
         let source_group = source.agent_group_id.clone();
+        let source_id = source.id.clone();
         let text = content.text.clone().unwrap_or_default();
 
         let target_label = target_group.clone();
@@ -329,38 +338,34 @@ impl Delivery {
             else {
                 return Ok(None);
             };
+            // One worker session per (source session, target group) so concurrent
+            // delegations don't interleave and the return address stays stable.
             let session = central.with(|conn| {
                 if agent_groups::get(conn, &target_group)?.is_none() {
                     return Ok(None);
                 }
-                match sessions::find_active(conn, &target_group, None, None)? {
+                match sessions::find_active(conn, &target_group, None, Some(source_id.as_str()))? {
                     Some(session) => Ok(Some(session)),
-                    None => sessions::create(conn, &target_group, None, None).map(Some),
+                    None => sessions::create(conn, &target_group, None, Some(source_id.as_str()))
+                        .map(Some),
                 }
             })?;
             let Some(session) = session else {
                 return Ok(None);
             };
 
-            let routing = Routing {
-                channel_type: Some(AGENT_CHANNEL_TYPE.to_owned()),
-                platform_id: Some(source_group.as_str().to_owned()),
+            // The worker's replies return to the originating session.
+            let return_routing = Routing {
+                channel_type: Some(AGENT_RETURN_CHANNEL_TYPE.to_owned()),
+                platform_id: Some(source_id.as_str().to_owned()),
                 thread_id: None,
             };
-            let chat = ChatContent {
-                sender,
-                sender_id: None,
-                text,
-                attachments: Vec::new(),
-                is_from_me: false,
-                quoted: None,
-            };
-            let body = serde_json::to_string(&chat).map_err(|err| {
-                DbError::Sqlite(rusqlite::Error::ToSqlConversionFailure(err.into()))
-            })?;
+            let body = chat_body(sender, text)?;
             let db = store.init(&session.agent_group_id, &session.id)?;
-            db.write_routing(&routing)?;
-            db.write_message(&NewInboundMessage::chat(body, routing))?;
+            db.write_routing(&return_routing)?;
+            let mut message = NewInboundMessage::chat(body, return_routing);
+            message.source_session_id = Some(source_id.as_str().to_owned());
+            db.write_message(&message)?;
             Ok(Some(session.id))
         })
         .await
@@ -374,6 +379,61 @@ impl Delivery {
             None => Err(format!("unknown target agent group {target_label:?}")),
         }
     }
+
+    /// The return leg: a worker's reply, delivered into the exact originating
+    /// session (by id) so the concierge re-runs and relays to the user. Its default
+    /// routing is left untouched — the concierge still replies to its own chat.
+    async fn return_to_session(
+        &self,
+        source: &sessions::Session,
+        return_session: &str,
+        content: &OutboundContent,
+    ) -> Result<(), String> {
+        let central = self.central.clone();
+        let store = self.store.clone();
+        let source_group = source.agent_group_id.clone();
+        let return_session = SessionId::new(return_session.to_owned());
+        let text = content.text.clone().unwrap_or_default();
+
+        let session_id = blocking(move || -> Result<Option<SessionId>, DeliveryError> {
+            let Some(sender) = central
+                .with(|conn| Ok(agent_groups::get(conn, &source_group)?.map(|group| group.name)))?
+            else {
+                return Ok(None);
+            };
+            let Some(target) = central.with(|conn| sessions::get(conn, &return_session))? else {
+                return Ok(None);
+            };
+            let body = chat_body(sender, text)?;
+            let db = store.init(&target.agent_group_id, &target.id)?;
+            db.write_message(&NewInboundMessage::chat(body, Routing::default()))?;
+            Ok(Some(target.id))
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+
+        match session_id {
+            Some(session_id) => {
+                self.queue.enqueue(session_id);
+                Ok(())
+            }
+            None => Err("agent-to-agent return: originating session is gone".to_owned()),
+        }
+    }
+}
+
+/// Serializes an inbound chat body (a bare `ChatContent`, matching the router).
+fn chat_body(sender: String, text: String) -> Result<String, DeliveryError> {
+    let chat = ChatContent {
+        sender,
+        sender_id: None,
+        text,
+        attachments: Vec::new(),
+        is_from_me: false,
+        quoted: None,
+    };
+    serde_json::to_string(&chat)
+        .map_err(|err| DbError::Sqlite(rusqlite::Error::ToSqlConversionFailure(err.into())).into())
 }
 
 async fn blocking<T, E>(
@@ -608,10 +668,10 @@ mod tests {
             "agent message must not reach the channel adapter"
         );
 
-        // The Coder group now has an active session carrying the inbound chat.
+        // A worker session namespaced by the *source* session carries the inbound.
         let target_session = fix
             .central
-            .with(|conn| sessions::find_active(conn, &target, None, None))
+            .with(|conn| sessions::find_active(conn, &target, None, Some(fix.session.id.as_str())))
             .expect("query")
             .expect("target session created");
         let target_db = fix
@@ -626,6 +686,17 @@ mod tests {
         assert!(inbound.content.contains("please review the PR"));
         assert!(inbound.content.contains("Andy"), "sender labelled");
 
+        // The worker session's default routing is the return address back to S_andy.
+        let return_routing = target_db.routing().expect("routing").expect("set");
+        assert_eq!(
+            return_routing.channel_type.as_deref(),
+            Some(AGENT_RETURN_CHANNEL_TYPE)
+        );
+        assert_eq!(
+            return_routing.platform_id.as_deref(),
+            Some(fix.session.id.as_str())
+        );
+
         // And the target session is enqueued for a run.
         assert!(
             fix.queue.snapshot().contains(&target_session.id),
@@ -639,6 +710,111 @@ mod tests {
             src_db.due_outbound(&now).expect("due").is_empty(),
             "agent message marked delivered"
         );
+    }
+
+    #[tokio::test]
+    async fn worker_reply_returns_to_the_originating_session_for_relay() {
+        let fix = fixture(0);
+        // S_andy is a user-chat session.
+        session_db(&fix)
+            .write_routing(&web_routing())
+            .expect("routing");
+
+        // The worker (Coder) replies via the "agent-return" channel addressed at S_andy.
+        let coder = fix
+            .central
+            .with(|conn| {
+                let group = agent_groups::create(conn, "Coder", "coder")?;
+                sessions::create(conn, &group.id, None, Some(fix.session.id.as_str()))
+            })
+            .expect("coder session");
+        let coder_db = fix
+            .store
+            .init(&coder.agent_group_id, &coder.id)
+            .expect("init");
+        let body =
+            serde_json::to_string(&OutboundContent::from_text("PR looks good")).expect("json");
+        coder_db
+            .write_outbound(&NewOutboundMessage::chat(
+                body,
+                Routing {
+                    channel_type: Some(AGENT_RETURN_CHANNEL_TYPE.to_owned()),
+                    platform_id: Some(fix.session.id.as_str().to_owned()),
+                    thread_id: None,
+                },
+            ))
+            .expect("write");
+
+        fix.delivery.drain_all().await.expect("drain");
+
+        // The reply landed in S_andy (the user-chat session), labelled from Coder.
+        let andy = session_db(&fix);
+        let inbound = andy
+            .transcript(10)
+            .expect("transcript")
+            .into_iter()
+            .find(|entry| entry.inbound)
+            .expect("relayed inbound");
+        assert!(inbound.content.contains("PR looks good"));
+        assert!(inbound.content.contains("Coder"), "sender is the worker");
+        // S_andy is enqueued so Andy re-runs and relays.
+        assert!(fix.queue.snapshot().contains(&fix.session.id));
+        // S_andy's default routing (the user's chat) is preserved by the return path.
+        assert_eq!(andy.routing().expect("routing"), Some(web_routing()));
+    }
+
+    #[tokio::test]
+    async fn delegation_round_trips_back_to_the_user_session() {
+        let fix = fixture(0);
+        let coder_group = fix
+            .central
+            .with(|conn| Ok(agent_groups::create(conn, "Coder", "coder")?.id))
+            .expect("coder group");
+        session_db(&fix)
+            .write_routing(&web_routing())
+            .expect("routing");
+
+        // 1. Andy(S_andy) delegates to Coder.
+        write_reply(
+            &fix,
+            "build the feature",
+            Routing {
+                channel_type: Some(AGENT_CHANNEL_TYPE.to_owned()),
+                platform_id: Some(coder_group.as_str().to_owned()),
+                thread_id: None,
+            },
+        );
+        fix.delivery.drain_all().await.expect("forward drain");
+
+        // 2. Coder replies with EMPTY routing — it must fall back to the worker
+        //    session's default (the return address) and come back to S_andy.
+        let coder_session = fix
+            .central
+            .with(|conn| {
+                sessions::find_active(conn, &coder_group, None, Some(fix.session.id.as_str()))
+            })
+            .expect("query")
+            .expect("worker session");
+        let coder_db = fix
+            .store
+            .open(&coder_session.agent_group_id, &coder_session.id)
+            .expect("open");
+        let body = serde_json::to_string(&OutboundContent::from_text("shipped it")).expect("json");
+        coder_db
+            .write_outbound(&NewOutboundMessage::chat(body, Routing::default()))
+            .expect("write");
+        fix.delivery.drain_all().await.expect("return drain");
+
+        // The worker's result is now a pending inbound in S_andy for Andy to relay.
+        let andy = session_db(&fix);
+        assert!(
+            andy.transcript(10)
+                .expect("transcript")
+                .iter()
+                .any(|e| e.inbound && e.content.contains("shipped it")),
+            "worker result reached the user's session"
+        );
+        assert!(fix.queue.snapshot().contains(&fix.session.id));
     }
 
     #[tokio::test]
