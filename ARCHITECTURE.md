@@ -182,6 +182,11 @@ operation lets us drop the exotic ones and keep the architectural ones:
    by parity.
 4. **The agent never sees routing.** `platform_id`/`channel_type`/`thread_id` are stripped before
    formatting; replies inherit routing from the row they answer, and the host validates destinations.
+5. **Presentation signals stay out of the agent ledger (M14).** The chat activity indicator
+   (ephemeral `run` SSE) and error cards (`web_messages` rows, the web channel's view) are additive
+   UI only — never written to `messages_in`/`messages_out`. The `RunNotifier` seam is optional and
+   side-effect-free w.r.t. a run: seq parity, `trigger` accumulation, and engage logic are identical
+   with or without it attached.
 
 **Dropped (and why):**
 

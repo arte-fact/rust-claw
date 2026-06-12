@@ -23,9 +23,35 @@
     if (transcript) {
       const pinned =
         transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-      transcript.insertAdjacentHTML('beforeend', html);
+      // Keep the activity indicator (if any) pinned to the very bottom.
+      const typing = document.getElementById('typing');
+      if (typing) typing.insertAdjacentHTML('beforebegin', html);
+      else transcript.insertAdjacentHTML('beforeend', html);
       if (pinned) scrollToBottom();
     }
+  };
+
+  const showTyping = (detail) => {
+    if (!transcript) return;
+    let row = document.getElementById('typing');
+    if (!row) {
+      const pinned =
+        transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+      row = document.createElement('div');
+      row.id = 'typing';
+      row.className = 'typing';
+      row.innerHTML =
+        '<span class="typing-text"></span>' +
+        '<span class="typing-dots"><i></i><i></i><i></i></span>';
+      transcript.appendChild(row);
+      if (pinned) scrollToBottom();
+    }
+    row.querySelector('.typing-text').textContent = detail || 'working';
+  };
+
+  const hideTyping = () => {
+    const row = document.getElementById('typing');
+    if (row) row.remove();
   };
 
   const onMessageUpdate = (event) => {
@@ -35,15 +61,21 @@
   };
 
   const onRun = (event) => {
-    if (!status) return;
     const { chat, state, detail } = JSON.parse(event.data);
-    if (chat !== currentChat || state === 'idle') {
-      status.textContent = '';
-      status.classList.remove('chat-status--working');
+    if (chat !== currentChat) return;
+    if (state === 'idle') {
+      if (status) {
+        status.textContent = '';
+        status.classList.remove('chat-status--working');
+      }
+      hideTyping();
       return;
     }
-    status.textContent = detail || 'working…';
-    status.classList.add('chat-status--working');
+    if (status) {
+      status.textContent = detail || 'working…';
+      status.classList.add('chat-status--working');
+    }
+    showTyping(detail);
   };
 
   const connect = () => {

@@ -3,6 +3,7 @@ pub mod api;
 pub mod auth;
 pub mod files;
 pub mod logs;
+pub mod notify;
 pub mod pages;
 pub mod render;
 pub mod sse;

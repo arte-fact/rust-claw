@@ -34,14 +34,15 @@ impl AgentProvider for NativeProvider {
             ChatClient::new(&inference).map_err(|err| ProviderError::Spawn(err.to_string()))?;
 
         let (input_tx, _input_rx) = mpsc::channel::<String>(1);
-        let (event_tx, event_rx) = mpsc::channel::<ProviderEvent>(4);
+        let (event_tx, event_rx) = mpsc::channel::<ProviderEvent>(8);
         let abort = CancellationToken::new();
         let run_abort = abort.clone();
+        let progress_tx = event_tx.clone();
 
         tokio::spawn(async move {
             let turn = tokio::select! {
                 () = run_abort.cancelled() => return,
-                turn = run_turn(&client, &input) => turn,
+                turn = run_turn(&client, &input, &progress_tx) => turn,
             };
             let event = match turn {
                 Ok(()) => ProviderEvent::TurnEnd { text: None },
@@ -66,10 +67,55 @@ struct TurnError {
     retryable: bool,
 }
 
+/// Presentation-only phase update for the chat activity indicator. Best-effort —
+/// a full or closed channel just drops it; it never affects the run.
+async fn progress(events: &mpsc::Sender<ProviderEvent>, message: &str) {
+    let _ = events
+        .send(ProviderEvent::Progress {
+            message: message.to_owned(),
+        })
+        .await;
+}
+
+/// A human phrase for the activity indicator from a tool name (native or MCP).
+fn tool_action(name: &str) -> String {
+    use tools::{
+        ADMIN, ASK_USER_QUESTION, BASH, CANCEL_TASK, EDIT, LIST_TASKS, PAUSE_TASK, READ,
+        RESUME_TASK, SCHEDULE_TASK, SEND_MESSAGE, SEND_TO_AGENT, WRITE,
+    };
+    let phrase = match name {
+        BASH => "running a command",
+        READ => "reading a file",
+        WRITE => "writing a file",
+        EDIT => "editing a file",
+        SEND_MESSAGE => "writing a reply",
+        SCHEDULE_TASK => "scheduling a task",
+        LIST_TASKS | CANCEL_TASK | PAUSE_TASK | RESUME_TASK => "managing tasks",
+        SEND_TO_AGENT => "messaging another agent",
+        ASK_USER_QUESTION => "asking a question",
+        ADMIN => "running an admin command",
+        other => {
+            return match crate::mcp::dequalify(other).map(|(_, tool)| tool) {
+                Some("search") => "searching the web".to_owned(),
+                Some("fetch") => "fetching a page".to_owned(),
+                Some("screenshot") => "taking a screenshot".to_owned(),
+                Some("interact") => "browsing".to_owned(),
+                Some(tool) => format!("calling {tool}"),
+                None => format!("calling {other}"),
+            };
+        }
+    };
+    phrase.to_owned()
+}
+
 /// The native agent writes its own outbound rows (via the `send_message` tool or
 /// the no-tool-call fallback), so a successful turn returns no text for the
 /// supervisor to write.
-async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnError> {
+async fn run_turn(
+    client: &ChatClient,
+    input: &QueryInput,
+    events: &mpsc::Sender<ProviderEvent>,
+) -> Result<(), TurnError> {
     let db = open_session_db(input.session_dir.clone()).await?;
     let system_prompt = read_agent_md(&input.cwd);
     let mut messages = initial_messages(db.clone(), system_prompt).await?;
@@ -87,6 +133,7 @@ async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnErr
     let mut produced_message = false;
 
     for _ in 0..MAX_TOOL_ROUNDS {
+        progress(events, "thinking…").await;
         let completion = client
             .complete(&messages, &tools)
             .await
@@ -100,6 +147,7 @@ async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnErr
             completion.tool_calls.clone(),
         ));
         for call in &completion.tool_calls {
+            progress(events, &tool_action(&call.function.name)).await;
             let outcome = tools::dispatch(&db, &tool_context, call).await;
             produced_message |= outcome.produced_message;
             messages.push(ChatMessage::tool_result(call.id.clone(), outcome.result));

@@ -301,6 +301,36 @@ logs`). Source: an in-memory ring buffer (last ~1000 records) filled by a custom
       end-to-end (snapshot render, structured fields captured, **live ERROR streamed in over SSE**,
       level filter 6→2); `screenshots/logs.png`; ARCHITECTURE §4 entry. (§4)
 
+## M14 — Chat activity indicator + error reporting
+
+Presentation-only chat feedback, **additive to the all-as-message model and never touching the
+session ledger** (`messages_in`/`messages_out`, seq parity, `trigger`): a phase-aware activity
+indicator while a run is live, and an error card when a run fails. The activity signal is ephemeral
+SSE; the error card is a `web_messages` row (the web presentation ledger the agent never reads).
+
+- [x] **14.1 Phase-aware activity indicator** (ephemeral SSE — wired the dead `onRun`/`#chat-status`
+      stub). Native loop (`providers/native/mod.rs`) threads `event_tx` into `run_turn` and emits
+      `ProviderEvent::Progress` before each model call ("thinking…") and each tool dispatch (a
+      `tool_action(name)` phrase, e.g. bash→"running a command", `web__search`→"searching the web").
+      `RunNotifier` trait (`src/runs/supervisor.rs`): `run_state(mg_id, busy, detail)` +
+      `run_failed`. `WebNotifier` (`src/web/notify.rs`) resolves mg → web `platform_id` and
+      `hub.publish("run", {chat, state, detail})` (read-only DB). Supervisor gets
+      `notifier: Option<Arc<dyn RunNotifier>>` + `with_notifier`; `run_session` (now a wrapper over
+      `run_drain`) publishes busy before drain + idle on every exit, and `consume_run` forwards
+      `Progress` via an `on_progress` callback. Fire-and-forget `spawn_blocking`. `app.rs` wires it.
+      `claw.js` shows the phase in `#chat-status` + an in-transcript dots row; `.typing` CSS.
+      Verified: live `run` events `working`("thinking…")→`idle` over `/events`.
+- [x] **14.2 Error reporting card** (presentation-only, persisted in `web_messages`).
+      `MessageRowKind::Error` + `append_error(conn, mg_id, detail)` (kind='error', no migration;
+      **dedups consecutive identical errors** → one card even when the sweep retries a misconfigured
+      agent). `render::message_html` gains `Error => error_html` + `templates/error.html`;
+      `.msg--error` CSS (left rule `--color-error`). `WebNotifier::run_failed` appends + publishes
+      `message` (live + survives reload). Reported both in the turn-failure branch **and** in the
+      wrapper for pre-loop failures (the common "no endpoint" case). Tests: `append_error` round-trip
+      + dedup, `error_html` escaping, `WebNotifier` (card row + `run`/`message` events), a recording-
+      `RunNotifier` supervisor test (busy→failed→idle). Verified end-to-end (live error card +
+      persisted, session `messages_in/out` untouched). `screenshots/chat.png`.
+
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);
 cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

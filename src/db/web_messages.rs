@@ -12,6 +12,7 @@ text_enum!(MessageRowKind {
     Chat => "chat",
     Question => "question",
     Approval => "approval",
+    Error => "error",
 });
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -48,6 +49,32 @@ pub fn append(
         params![messaging_group_id, direction, sender, body, message_out_id],
     )?;
     fetch(conn, conn.last_insert_rowid())
+}
+
+/// Appends a presentation-only error notice (M14). Lives solely in the web
+/// transcript ledger — never written to the session DB, so agent context is
+/// untouched. `direction='out'`/`sender='system'` mark it as a non-user notice.
+/// Returns `None` when the last row is already an identical error, so a session
+/// that keeps failing (e.g. a misconfigured agent the sweep retries) collapses to
+/// one card instead of spamming the transcript.
+pub fn append_error(
+    conn: &Connection,
+    messaging_group_id: &MessagingGroupId,
+    detail: &str,
+) -> Result<Option<WebMessage>, rusqlite::Error> {
+    if let Some(last) = list(conn, messaging_group_id, 1)?.pop()
+        && last.kind == MessageRowKind::Error
+        && last.body == detail
+    {
+        return Ok(None);
+    }
+    conn.execute(
+        "INSERT INTO web_messages
+           (messaging_group_id, direction, sender, body, created_at, kind)
+         VALUES (?1, 'out', 'system', ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'error')",
+        params![messaging_group_id, detail],
+    )?;
+    fetch(conn, conn.last_insert_rowid()).map(Some)
 }
 
 /// Appends an open question card; `answer` stays NULL until the user chooses.
@@ -188,6 +215,30 @@ mod tests {
                 last_two.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
                 vec!["second", "third"]
             );
+            Ok(())
+        })
+        .expect("db ops");
+    }
+
+    #[test]
+    fn error_card_round_trips_in_the_web_transcript() {
+        let db = CentralDb::open_in_memory().expect("open");
+        db.with(|conn| {
+            let chat = messaging_groups::create(conn, "web", "chat-1", None, false)?;
+            let card = append_error(conn, &chat.id, "no endpoint configured")?
+                .expect("first error inserted");
+            assert_eq!(card.kind, MessageRowKind::Error);
+            assert_eq!(card.sender, "system");
+            assert_eq!(card.body, "no endpoint configured");
+
+            // A consecutive identical error collapses (no duplicate card).
+            assert!(append_error(conn, &chat.id, "no endpoint configured")?.is_none());
+            // A different error still appends.
+            assert!(append_error(conn, &chat.id, "something else")?.is_some());
+
+            let listed = list(conn, &chat.id, 10)?;
+            assert_eq!(listed.len(), 2);
+            assert!(listed.iter().all(|m| m.kind == MessageRowKind::Error));
             Ok(())
         })
         .expect("db ops");

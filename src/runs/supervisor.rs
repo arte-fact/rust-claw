@@ -6,7 +6,7 @@ use crate::commands::{CallerContext, Dispatcher};
 use crate::db::{CentralDb, DbError, agent_groups, sessions};
 use crate::protocol::content::{InboundContent, OutboundContent, Routing};
 use crate::protocol::entities::{AgentProviderKind, CliScope};
-use crate::protocol::ids::SessionId;
+use crate::protocol::ids::{MessagingGroupId, SessionId};
 use crate::protocol::message::MessageStatus;
 use crate::providers::{
     ActiveRun, AgentAdmin, AgentProvider, ProviderError, ProviderEvent, QueryInput, create_provider,
@@ -36,6 +36,17 @@ pub enum RunError {
 type ProviderFactory =
     Box<dyn Fn(AgentProviderKind) -> Result<Arc<dyn AgentProvider>, ProviderError> + Send + Sync>;
 
+/// Presentation-only run-lifecycle signals for the chat UI (M14), implemented by
+/// the web layer so the supervisor stays channel-agnostic. Every method is
+/// best-effort and side-effect-free w.r.t. the run: a run produces the identical
+/// result with or without a notifier attached (it's optional, tests use `None`).
+pub trait RunNotifier: Send + Sync {
+    /// The chat is processing (`busy`) with an optional phase label, or finished.
+    fn run_state(&self, messaging_group_id: &MessagingGroupId, busy: bool, detail: Option<&str>);
+    /// A run failed — surface it in the chat. Never written to the session ledger.
+    fn run_failed(&self, messaging_group_id: &MessagingGroupId, detail: &str);
+}
+
 /// The supervisor's slice of the instance config.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
@@ -53,6 +64,7 @@ pub struct Supervisor {
     factory: ProviderFactory,
     batch_limit: i64,
     mcp: Option<Arc<crate::mcp::McpClient>>,
+    notifier: Option<Arc<dyn RunNotifier>>,
 }
 
 impl Supervisor {
@@ -92,6 +104,7 @@ impl Supervisor {
             factory,
             batch_limit: 10,
             mcp: None,
+            notifier: None,
         }
     }
 
@@ -101,6 +114,37 @@ impl Supervisor {
     pub fn with_mcp(mut self, mcp: Option<Arc<crate::mcp::McpClient>>) -> Self {
         self.mcp = mcp;
         self
+    }
+
+    /// Attaches the chat-presence notifier for activity/error signals (M14).
+    #[must_use]
+    pub fn with_notifier(mut self, notifier: Option<Arc<dyn RunNotifier>>) -> Self {
+        self.notifier = notifier;
+        self
+    }
+
+    /// Fire-and-forget presentation signal — offloaded so it never blocks or fails
+    /// the run loop. No-op without a notifier or a messaging group (e.g. CLI runs).
+    fn notify_state(
+        &self,
+        messaging_group_id: &Option<MessagingGroupId>,
+        busy: bool,
+        detail: Option<&str>,
+    ) {
+        let (Some(notifier), Some(group)) = (&self.notifier, messaging_group_id) else {
+            return;
+        };
+        let (notifier, group) = (notifier.clone(), group.clone());
+        let detail = detail.map(str::to_owned);
+        tokio::task::spawn_blocking(move || notifier.run_state(&group, busy, detail.as_deref()));
+    }
+
+    fn notify_failed(&self, messaging_group_id: &Option<MessagingGroupId>, detail: &str) {
+        let (Some(notifier), Some(group)) = (&self.notifier, messaging_group_id) else {
+            return;
+        };
+        let (notifier, group, detail) = (notifier.clone(), group.clone(), detail.to_owned());
+        tokio::task::spawn_blocking(move || notifier.run_failed(&group, &detail));
     }
 
     /// The single run consumer: pops sessions one at a time, forever.
@@ -117,9 +161,27 @@ impl Supervisor {
         }
     }
 
-    /// Drain-and-exit: process due batches until none remain, then return.
+    /// Drain-and-exit: process due batches until none remain, then return. Wraps
+    /// the drain so the activity indicator is always cleared on exit (M14).
     pub async fn run_session(&self, session_id: &SessionId) -> Result<(), RunError> {
         let (session, group) = self.load_session(session_id).await?;
+        let messaging_group_id = session.messaging_group_id.clone();
+        let result = self.run_drain(session, group, &messaging_group_id).await;
+        // A run that fails *before* the turn loop (e.g. no endpoint configured)
+        // surfaces here; turn failures already reported inside the drain return Ok.
+        if let Err(error) = &result {
+            self.notify_failed(&messaging_group_id, &error.to_string());
+        }
+        self.notify_state(&messaging_group_id, false, None);
+        result
+    }
+
+    async fn run_drain(
+        &self,
+        session: sessions::Session,
+        group: agent_groups::AgentGroup,
+        messaging_group_id: &Option<MessagingGroupId>,
+    ) -> Result<(), RunError> {
         let db = self.open_session_db(&session).await?;
         let provider_kind = group.agent_provider.unwrap_or(AgentProviderKind::Native);
         let provider = (self.factory)(provider_kind)?;
@@ -157,6 +219,7 @@ impl Supervisor {
                 blocking(move || db.mark_status(&ids, MessageStatus::Processing)).await?;
             }
 
+            self.notify_state(messaging_group_id, true, Some("thinking…"));
             let run = provider.start(QueryInput {
                 prompt: draft_prompt(&batch),
                 cwd: workspace.clone(),
@@ -169,7 +232,11 @@ impl Supervisor {
                 mcp: self.mcp.clone(),
             })?;
 
-            match consume_run(run).await {
+            let outcome = consume_run(run, |detail| {
+                self.notify_state(messaging_group_id, true, Some(detail));
+            })
+            .await;
+            match outcome {
                 Ok(reply_text) => {
                     let db = db.clone();
                     let first_id = ids[0].clone();
@@ -189,6 +256,7 @@ impl Supervisor {
                 }
                 Err(message) => {
                     tracing::warn!(session = %session.id, error = %message, "agent turn failed");
+                    self.notify_failed(messaging_group_id, &message);
                     let db = db.clone();
                     let batch = batch.clone();
                     blocking(move || apply_retry_backoff(&db, &batch)).await?;
@@ -346,7 +414,10 @@ fn apply_retry_backoff(db: &SessionDb, batch: &[InboundMessage]) -> Result<(), S
 /// Per-batch turn: no follow-ups are pushed; the drain loop handles new arrivals.
 /// A run that goes silent past the watchdog deadline is aborted and treated as a
 /// (retryable) failure.
-async fn consume_run(mut run: ActiveRun) -> Result<Option<String>, String> {
+async fn consume_run(
+    mut run: ActiveRun,
+    on_progress: impl Fn(&str),
+) -> Result<Option<String>, String> {
     drop(run.input);
     loop {
         match tokio::time::timeout(crate::recovery::WATCHDOG_TIMEOUT, run.events.recv()).await {
@@ -360,7 +431,8 @@ async fn consume_run(mut run: ActiveRun) -> Result<Option<String>, String> {
             Ok(None) => return Err("agent run ended without a result".to_owned()),
             Ok(Some(ProviderEvent::TurnEnd { text })) => return Ok(text),
             Ok(Some(ProviderEvent::Error { message, .. })) => return Err(message),
-            Ok(Some(ProviderEvent::Activity | ProviderEvent::Progress { .. })) => {}
+            Ok(Some(ProviderEvent::Progress { message })) => on_progress(&message),
+            Ok(Some(ProviderEvent::Activity)) => {}
         }
     }
 }
@@ -527,6 +599,91 @@ mod tests {
             run_config(fix),
             Box::new(|_| Ok(Arc::new(FailingProvider))),
         )
+    }
+
+    #[derive(Default)]
+    struct RecordingNotifier {
+        log: std::sync::Mutex<Vec<String>>,
+    }
+    impl RunNotifier for RecordingNotifier {
+        fn run_state(&self, _mg: &MessagingGroupId, busy: bool, detail: Option<&str>) {
+            let entry = if busy {
+                format!("busy:{}", detail.unwrap_or(""))
+            } else {
+                "idle".to_owned()
+            };
+            self.log.lock().expect("lock").push(entry);
+        }
+        fn run_failed(&self, _mg: &MessagingGroupId, detail: &str) {
+            self.log
+                .lock()
+                .expect("lock")
+                .push(format!("failed:{detail}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_run_notifies_busy_then_failure_then_idle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let central = Arc::new(CentralDb::open_in_memory().expect("central"));
+        let (session_id, agent_group_id) = central
+            .with(|conn| {
+                let mut group = agent_groups::create(conn, "Test", "test")?;
+                group.agent_provider = Some(AgentProviderKind::Echo);
+                agent_groups::update(conn, &group)?;
+                let chat = crate::db::messaging_groups::create(
+                    conn,
+                    crate::channels::web::CHANNEL_TYPE,
+                    "chat-1",
+                    None,
+                    false,
+                )?;
+                let session = sessions::create(conn, &group.id, Some(&chat.id), None)?;
+                Ok((session.id, group.id))
+            })
+            .expect("rows");
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        store
+            .open(&agent_group_id, &session_id)
+            .expect("open")
+            .write_message(&NewInboundMessage::chat(
+                "{\"sender\":\"you\",\"text\":\"hi\"}".to_owned(),
+                Routing::default(),
+            ))
+            .expect("write");
+
+        let recorder = Arc::new(RecordingNotifier::default());
+        Supervisor::with_factory(
+            central.clone(),
+            store,
+            Arc::new(RunQueue::new()),
+            Arc::new(crate::commands::Registry::new(central)),
+            RunConfig {
+                groups_dir: tmp.path().join("groups"),
+                default_endpoint: None,
+                default_model: None,
+            },
+            Box::new(|_| Ok(Arc::new(FailingProvider))),
+        )
+        .with_notifier(Some(recorder.clone()))
+        .run_session(&session_id)
+        .await
+        .expect("run");
+
+        // Notifier calls are fire-and-forget on the blocking pool — wait for them.
+        let mut log = Vec::new();
+        for _ in 0..100 {
+            log = recorder.log.lock().expect("lock").clone();
+            if log.iter().any(|e| e == "failed:boom")
+                && log.last().map(String::as_str) == Some("idle")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(log.iter().any(|e| e.starts_with("busy")), "{log:?}");
+        assert!(log.iter().any(|e| e == "failed:boom"), "{log:?}");
+        assert_eq!(log.last().map(String::as_str), Some("idle"), "{log:?}");
     }
 
     #[tokio::test]

@@ -14,6 +14,14 @@ struct MessageItem {
 }
 
 #[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorCard {
+    id: i64,
+    time: String,
+    message: String,
+}
+
+#[derive(Template)]
 #[template(path = "question.html")]
 struct QuestionCard {
     id: i64,
@@ -35,8 +43,21 @@ pub fn message_html(message: &WebMessage) -> String {
     match message.kind {
         MessageRowKind::Question => card_html(message, "question"),
         MessageRowKind::Approval => card_html(message, "approval"),
+        MessageRowKind::Error => error_html(message),
         MessageRowKind::Chat => chat_html(message),
     }
+}
+
+fn error_html(message: &WebMessage) -> String {
+    let card = ErrorCard {
+        id: message.id,
+        time: clock_time(&message.created_at),
+        message: escape_html(&message.body),
+    };
+    card.render().unwrap_or_else(|error| {
+        tracing::error!(%error, "error card template render failed");
+        String::new()
+    })
 }
 
 fn chat_html(message: &WebMessage) -> String {
@@ -165,6 +186,19 @@ mod tests {
         assert!(html.contains("<code>code</code>"));
         assert!(html.contains("msg--out"));
         assert!(html.contains("09:05"));
+    }
+
+    #[test]
+    fn error_card_renders_as_an_escaped_error_notice() {
+        let html = message_html(&WebMessage {
+            kind: MessageRowKind::Error,
+            sender: "system".to_owned(),
+            ..message(Direction::Out, "no endpoint <configured>")
+        });
+        assert!(html.contains("msg--error"));
+        assert!(html.contains(">error<"));
+        assert!(html.contains("no endpoint &lt;configured&gt;"));
+        assert!(!html.contains("<configured>"));
     }
 
     #[test]

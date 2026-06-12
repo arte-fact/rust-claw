@@ -97,6 +97,10 @@ pub async fn build_with_logs(
 
     let commands = Arc::new(crate::commands::Registry::new(central.clone()));
 
+    let notifier = Arc::new(crate::web::notify::WebNotifier::new(
+        central.clone(),
+        hub.clone(),
+    ));
     let supervisor = Arc::new(
         Supervisor::new(
             central.clone(),
@@ -109,7 +113,8 @@ pub async fn build_with_logs(
                 default_model: config.default_model.clone(),
             },
         )
-        .with_mcp(connect_web_mcp().await),
+        .with_mcp(connect_web_mcp().await)
+        .with_notifier(Some(notifier)),
     );
     tasks.spawn(supervisor.run(cancel.clone()));
 
