@@ -714,7 +714,11 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
 | `pulldown-cmark` (+ sanitizer) | server-side markdown for agent messages |
 | `rust-embed` (or `include_dir`) | UI assets (css, js, Fira Code woff2) in the binary |
 
-Dropped relative to earlier drafts: `rmcp` (returns if/when the MCP-client backlog item lands).
+No new crate for MCP (M12): the stdio client (`src/mcp/`) is hand-rolled on `tokio` + `serde_json`,
+so `rmcp` stays out of the tree. The bundled web-search MCP server is a **separate Rust binary**
+(`mcp-web-search-stdio`, built from a pinned upstream commit in the Docker image) that claw spawns
+over stdio — still 100 % Rust and no second *language* runtime (decision 001). The one real cost is
+that the runtime image now ships a headless **Chromium** (a few hundred MB) for that server.
 No Node, no TypeScript, no JS package manager anywhere in the project.
 
 ---

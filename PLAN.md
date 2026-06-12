@@ -265,11 +265,15 @@ backed by a headless Chromium — into the native loop as the first `src/mcp/` c
       panics — mirrors admin). `app.rs::connect_web_mcp` spawns the client best-effort at boot and
       `Supervisor::with_mcp` threads it → `QueryInput` → `ToolContext` (a failed spawn ⇒ `None`, no
       gating). ARCHITECTURE §4 `mcp/` entry added.
-- [ ] **12.3 Dockerfile + docs.** Builder stage clones + `cargo build --release`s the stdio binary,
-      copies `mcp-web-search-stdio` into the runtime image; runtime stage apt-installs `chromium` +
-      shared libs and sets the Chrome-path env the binary expects. Enabled by default (no env to add).
-      Update README (new web tools + Chromium footprint) and ARCHITECTURE (§4 `mcp/` module + a note
-      on the Chromium image-size deviation from decision 001).
+- [x] **12.3 Dockerfile + docs.** New `mcp-builder` stage clones the pinned upstream commit
+      (`MCP_WEB_SEARCH_REF`) and `cargo build --release -p mcp-web-search-stdio`; runtime stage
+      apt-installs `chromium`, copies the binary to `/usr/local/bin`, and sets
+      `CHROME_PATH=/usr/bin/chromium` (the server already launches with sandbox off). README gains a
+      web-access feature bullet + a security note (agents reach the internet; Chromium adds ~MB);
+      ARCHITECTURE §13 notes the hand-rolled-no-`rmcp` choice + the Chromium deviation. Verified
+      end-to-end: stdio binary builds; piping JSON-RPC to the real binary returns the 4 tools and a
+      live `search` result (`content` text blocks); booting claw with the binary on PATH logs
+      `web-search mcp server connected tools=4`.
 
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);

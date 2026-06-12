@@ -45,6 +45,9 @@ second runtime. It's 100 % Rust in one container.
 - **Tools** — agents can send you messages, ask multiple-choice questions, and
   schedule work. "Coder" agents can additionally run shell commands and read /
   write / edit files in their own workspace.
+- **Web access** — every agent can search the web, fetch a page as clean text,
+  screenshot it, or click around, via a bundled MCP server (headless Chromium,
+  enabled by default). No setup; nothing to configure.
 - **Scheduling** — ask for a reminder or a recurring task ("every weekday at 9am…")
   and claw runs it on time, no separate cron.
 - **Multiple agents** — keep a fast conversational assistant and a heavier coding
@@ -253,6 +256,9 @@ working.
   surface if you give its group a non-`disabled` CLI scope. A coder agent's shell
   runs **inside the container** — the container is the isolation boundary, so
   don't hand untrusted models a coder profile on a host you care about.
+- **Web access is on for every agent** (the bundled search/fetch/screenshot
+  tools), so agents can reach the public internet from inside the container. The
+  image ships a headless Chromium for this, which adds a few hundred MB.
 
 ## Troubleshooting
 
