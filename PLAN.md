@@ -238,6 +238,37 @@ browser is jailed to one agent's folder server-side — the client is never trus
       Verified every endpoint over HTTP (write/read, mkdir + 409, rename, upload, download, delete,
       escape→400, root→400) + Playwright; refreshed `screenshots/files.png`. (§11)
 
-Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
-the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for
-external agents; cross-turn tool-round persistence if 4.7's mitigation proves insufficient.
+## M12 — Web tools for agents via MCP
+
+Plug [`arte-fact/mcp-web-search-hacks`](https://github.com/arte-fact/mcp-web-search-hacks) — a Rust
+stdio MCP server (`mcp-web-search-stdio`) exposing `fetch`/`search`/`screenshot`/`interact`, all
+backed by a headless Chromium — into the native loop as the first `src/mcp/` consumer. **Decisions
+(with the user):** hand-rolled stdio client (no `rmcp` crate); tools exposed to **all** agents;
+**no config surface** — the web-search server is hardcoded and enabled by default. Still 100 % Rust
+(no second *language* runtime, decision 001); the cost is shipping Chromium (~300 MB) in the image.
+
+- [x] **12.1 Hand-rolled stdio MCP client** (`src/mcp/`). No new dependency — `tokio` (`process` +
+      `io-util`) + `serde_json`. `conn.rs`: a generic `Conn<W, R>` speaking newline-delimited
+      JSON-RPC 2.0 (the MCP stdio transport) — `initialize` + `notifications/initialized`,
+      `tools/list`, `tools/call` (replies matched by id, interleaved notifications skipped), plus
+      `flatten_content` (text blocks joined, non-text noted). `mod.rs`: `McpClient::spawn` runs the
+      child, handshakes, caches the tool list; serializes calls behind a `tokio::sync::Mutex` (Chrome
+      is single-session); `qualify`/`dequalify` give `<server>__<tool>` namespacing. `McpError`
+      (thiserror); a failed spawn is returned so the caller runs without it. Tests: full
+      handshake/list/call round-trip over `tokio::io::duplex` mock + flatten + namespacing.
+- [ ] **12.2 Bridge MCP tools into the native loop.** `ToolDefinition`/`FunctionDefinition`
+      (`providers/native/client.rs`) → owned strings (`Cow<'static, str>`), fixing native call sites.
+      `ToolContext` (`tools.rs`) gains `mcp: Option<Arc<McpClient>>`; `definitions(profile,
+      admin_enabled, mcp)` appends namespaced MCP tool defs **for every agent**; `dispatch()` gets a
+      fallback branch routing `<server>__<tool>` to `McpClient::call_tool` (errors → result strings,
+      never panics the loop — mirrors the admin tool). `app.rs` builds the shared client at boot and
+      threads it `Supervisor` → `QueryInput` (`providers/mod.rs`) → `ToolContext` — no gating.
+- [ ] **12.3 Dockerfile + docs.** Builder stage clones + `cargo build --release`s the stdio binary,
+      copies `mcp-web-search-stdio` into the runtime image; runtime stage apt-installs `chromium` +
+      shared libs and sets the Chrome-path env the binary expects. Enabled by default (no env to add).
+      Update README (new web tools + Chromium footprint) and ARCHITECTURE (§4 `mcp/` module + a note
+      on the Chromium image-size deviation from decision 001).
+
+Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
+external agents; per-group MCP server configuration (M12 ships a single global server);
+cross-turn tool-round persistence if 4.7's mitigation proves insufficient.
