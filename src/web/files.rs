@@ -1,7 +1,9 @@
 use askama::Template;
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +138,121 @@ pub async fn read_file(
     })
     .await?;
     Ok(Json(FileContent { path, content }))
+}
+
+#[derive(Deserialize)]
+pub struct WriteBody {
+    pub path: String,
+    pub content: String,
+}
+
+pub async fn write(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Json(body): Json<WriteBody>,
+) -> Result<StatusCode, ApiError> {
+    let WriteBody { path, content } = body;
+    with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::write_text(workspace, &path, &content)?)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct PathBody {
+    pub path: String,
+}
+
+pub async fn mkdir(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Json(body): Json<PathBody>,
+) -> Result<StatusCode, ApiError> {
+    let path = body.path;
+    with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::mkdir(workspace, &path)?)
+    })
+    .await?;
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn delete_entry(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Json(body): Json<PathBody>,
+) -> Result<StatusCode, ApiError> {
+    let path = body.path;
+    with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::delete(workspace, &path)?)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct RenameBody {
+    pub from: String,
+    pub to: String,
+}
+
+pub async fn rename(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<StatusCode, ApiError> {
+    let RenameBody { from, to } = body;
+    with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::rename(workspace, &from, &to)?)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Raw-body upload: the client POSTs the file bytes with `?path=<dir>/<name>`. Using
+/// the built-in `Bytes` extractor avoids pulling in axum's `multipart` feature.
+pub async fn upload(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Query(query): Query<PathQuery>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let path = query.path;
+    let bytes = body.to_vec();
+    with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::write_bytes(workspace, &path, &bytes)?)
+    })
+    .await?;
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn download(
+    State(state): State<WebState>,
+    Path(platform_id): Path<String>,
+    Query(query): Query<PathQuery>,
+) -> Result<Response, ApiError> {
+    let path = query.path.clone();
+    let bytes = with_workspace(&state, platform_id, move |workspace| {
+        Ok(workspace::ops::read_bytes(workspace, &path)?)
+    })
+    .await?;
+    let filename = query
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or("download")
+        .replace(['"', '\n', '\r'], "_");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

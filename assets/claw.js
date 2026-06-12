@@ -129,17 +129,34 @@
     const listEl = document.getElementById('fs-list');
     const crumbEl = document.getElementById('fs-breadcrumb');
     const viewerEl = document.getElementById('fs-viewer');
+    const msgEl = document.getElementById('fs-msg');
+    const nameForm = document.getElementById('fs-newname');
+    const nameInput = document.getElementById('fs-newname-input');
+    const uploadInput = document.getElementById('fs-upload-input');
+    let currentPath = '';
+    let pending = null; // { mode: 'file'|'folder'|'rename', target }
 
     const escapeHtml = (text) =>
       text.replace(/[&<>"']/g, (ch) =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     const parentOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
     const join = (dir, name) => (dir ? `${dir}/${name}` : name);
+    const rawUrl = (path) => `/chats/${chat}/files/raw?path=${encodeURIComponent(path)}`;
     const fmtSize = (n) => {
       if (n < 1024) return `${n} B`;
       if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} K`;
       return `${(n / (1024 * 1024)).toFixed(1)} M`;
     };
+    const flash = (text) => {
+      msgEl.textContent = text;
+      if (text) setTimeout(() => { if (msgEl.textContent === text) msgEl.textContent = ''; }, 2500);
+    };
+    const api = (suffix, body) =>
+      fetch(`/api/chats/${chat}/files${suffix}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
     const renderCrumbs = (path) => {
       const crumbs = ['<a class="fs-crumb" data-path="">root</a>'];
@@ -152,36 +169,42 @@
     };
 
     const navigate = async (path) => {
-      const url = `/api/chats/${chat}/files/list?path=${encodeURIComponent(path)}`;
-      const res = await fetch(url);
+      const res = await fetch(`/api/chats/${chat}/files/list?path=${encodeURIComponent(path)}`);
       if (!res.ok) {
         listEl.innerHTML = '<li class="fs-error">cannot open this folder</li>';
         return;
       }
+      currentPath = path;
       const { entries } = await res.json();
       renderCrumbs(path);
       const rows = [];
       if (path) {
-        rows.push(`<li><button class="fs-entry fs-up" data-dir="${escapeHtml(parentOf(path))}">..</button></li>`);
+        rows.push(`<li class="fs-row fs-row--up"><button class="fs-entry fs-up" data-dir="${escapeHtml(parentOf(path))}">..</button></li>`);
       }
       for (const entry of entries) {
         const child = escapeHtml(join(path, entry.name));
         const name = escapeHtml(entry.name);
-        if (entry.kind === 'dir') {
-          rows.push(`<li><button class="fs-entry fs-dir" data-dir="${child}"><span class="fs-icon"></span><span class="fs-entry-name">${name}/</span></button></li>`);
-        } else {
-          const kind = entry.kind === 'symlink' ? 'fs-symlink' : 'fs-file';
-          rows.push(`<li><button class="fs-entry ${kind}" data-file="${child}"><span class="fs-icon"></span><span class="fs-entry-name">${name}</span><span class="fs-size">${fmtSize(entry.size)}</span></button></li>`);
-        }
+        const open = entry.kind === 'dir'
+          ? `<button class="fs-entry fs-dir" data-dir="${child}"><span class="fs-icon"></span><span class="fs-entry-name">${name}/</span></button>`
+          : `<button class="fs-entry ${entry.kind === 'symlink' ? 'fs-symlink' : 'fs-file'}" data-file="${child}"><span class="fs-icon"></span><span class="fs-entry-name">${name}</span><span class="fs-size">${fmtSize(entry.size)}</span></button>`;
+        rows.push(
+          `<li class="fs-row">${open}<span class="fs-row-actions">` +
+          `<button class="fs-act" data-act="rename" data-path="${child}" data-name="${name}" title="rename">✎</button>` +
+          `<button class="fs-act" data-act="delete" data-path="${child}" title="delete">✕</button>` +
+          '</span></li>',
+        );
       }
       listEl.innerHTML = rows.join('') || '<li class="fs-hint">empty folder</li>';
     };
 
-    const view = async (path) => {
-      const url = `/api/chats/${chat}/files/read?path=${encodeURIComponent(path)}`;
-      const res = await fetch(url);
+    const openFile = async (path) => {
+      const res = await fetch(`/api/chats/${chat}/files/read?path=${encodeURIComponent(path)}`);
+      const head =
+        `<div class="fs-viewer-head"><span class="fs-filename">${escapeHtml(path)}</span>` +
+        `<span class="fs-viewer-actions">SAVE<a class="fs-tool" href="${rawUrl(path)}">download</a></span></div>`;
       if (res.status === 415) {
-        viewerEl.innerHTML = '<p class="fs-hint">can’t preview this file — it’s binary or too large</p>';
+        viewerEl.innerHTML = head.replace('SAVE', '') +
+          '<p class="fs-hint">binary or too large to edit — download instead</p>';
         return;
       }
       if (!res.ok) {
@@ -189,21 +212,93 @@
         return;
       }
       const { content } = await res.json();
-      viewerEl.innerHTML = `<div class="fs-filename">${escapeHtml(path)}</div><pre class="fs-code"></pre>`;
-      viewerEl.querySelector('.fs-code').textContent = content;
+      viewerEl.innerHTML =
+        head.replace('SAVE', '<button class="fs-tool" id="fs-save">save</button>') +
+        '<textarea class="fs-editor" id="fs-editor" spellcheck="false"></textarea>';
+      const editor = document.getElementById('fs-editor');
+      editor.value = content;
+      document.getElementById('fs-save').addEventListener('click', async () => {
+        const saved = await api('/write', { path, content: editor.value });
+        flash(saved.ok ? 'saved' : 'save failed');
+      });
     };
 
-    listEl.addEventListener('click', (event) => {
-      const dir = event.target.closest('[data-dir]');
-      if (dir) {
-        navigate(dir.dataset.dir);
+    const promptName = (mode, prefill, target) => {
+      pending = { mode, target };
+      nameForm.hidden = false;
+      nameInput.value = prefill || '';
+      nameInput.focus();
+      nameInput.select();
+    };
+    const hidePrompt = () => { nameForm.hidden = true; pending = null; nameInput.value = ''; };
+
+    nameForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const name = nameInput.value.trim();
+      if (!name || !pending) { hidePrompt(); return; }
+      const { mode, target } = pending;
+      let res;
+      let toOpen = null;
+      if (mode === 'folder') {
+        res = await api('/mkdir', { path: join(currentPath, name) });
+      } else if (mode === 'rename') {
+        res = await api('/rename', { from: target, to: join(currentPath, name) });
+      } else {
+        toOpen = join(currentPath, name);
+        res = await api('/write', { path: toOpen, content: '' });
+      }
+      hidePrompt();
+      if (res.ok) {
+        await navigate(currentPath);
+        if (toOpen) openFile(toOpen);
+      } else {
+        flash(res.status === 409 ? 'already exists' : 'failed');
+      }
+    });
+    nameInput.addEventListener('keydown', (event) => { if (event.key === 'Escape') hidePrompt(); });
+
+    document.getElementById('fs-new-file').addEventListener('click', () => promptName('file'));
+    document.getElementById('fs-new-folder').addEventListener('click', () => promptName('folder'));
+    document.getElementById('fs-upload').addEventListener('click', () => uploadInput.click());
+    uploadInput.addEventListener('change', async () => {
+      const file = uploadInput.files[0];
+      uploadInput.value = '';
+      if (!file) return;
+      const res = await fetch(
+        `/api/chats/${chat}/files/upload?path=${encodeURIComponent(join(currentPath, file.name))}`,
+        { method: 'POST', body: file },
+      );
+      if (res.ok) { await navigate(currentPath); flash(`uploaded ${file.name}`); }
+      else flash('upload failed');
+    });
+
+    listEl.addEventListener('click', async (event) => {
+      const act = event.target.closest('[data-act]');
+      if (act) {
+        const { act: kind, path } = act.dataset;
+        if (kind === 'rename') {
+          promptName('rename', act.dataset.name, path);
+        } else if (kind === 'delete') {
+          act.closest('.fs-row-actions').innerHTML =
+            `<span class="fs-confirm">delete?</span>` +
+            `<button class="fs-act fs-act--yes" data-act="delete-yes" data-path="${escapeHtml(path)}">yes</button>` +
+            `<button class="fs-act" data-act="delete-no">no</button>`;
+        } else if (kind === 'delete-yes') {
+          const done = await api('/delete', { path });
+          flash(done.ok ? 'deleted' : 'delete failed');
+          navigate(currentPath);
+        } else if (kind === 'delete-no') {
+          navigate(currentPath);
+        }
         return;
       }
+      const dir = event.target.closest('[data-dir]');
+      if (dir) { navigate(dir.dataset.dir); return; }
       const file = event.target.closest('[data-file]');
       if (file) {
         listEl.querySelectorAll('.fs-entry--active').forEach((el) => el.classList.remove('fs-entry--active'));
         file.classList.add('fs-entry--active');
-        view(file.dataset.file);
+        openFile(file.dataset.file);
       }
     });
     crumbEl.addEventListener('click', (event) => {

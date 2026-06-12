@@ -10,8 +10,9 @@ pub mod tasks;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use crate::channels::web::WebChannel;
 use crate::commands::Registry;
@@ -19,6 +20,9 @@ use crate::db::CentralDb;
 use crate::session::SessionStore;
 use auth::AuthState;
 use sse::Hub;
+
+/// Cap on a single file upload through the browser (32 MiB).
+const UPLOAD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct WebState {
@@ -41,11 +45,23 @@ pub fn build_app(state: WebState) -> Router {
         .route("/chats", axum::routing::post(pages::create_chat_form))
         .route("/chats/{platform_id}", get(pages::chat_page))
         .route("/chats/{platform_id}/files", get(files::page))
+        .route("/chats/{platform_id}/files/raw", get(files::download))
         .route(
             "/api/chats/{platform_id}/files/list",
             get(files::list_entries),
         )
         .route("/api/chats/{platform_id}/files/read", get(files::read_file))
+        .route("/api/chats/{platform_id}/files/write", post(files::write))
+        .route("/api/chats/{platform_id}/files/mkdir", post(files::mkdir))
+        .route("/api/chats/{platform_id}/files/rename", post(files::rename))
+        .route(
+            "/api/chats/{platform_id}/files/delete",
+            post(files::delete_entry),
+        )
+        .route(
+            "/api/chats/{platform_id}/files/upload",
+            post(files::upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT_BYTES)),
+        )
         .route("/events", get(sse::events))
         .route("/api/chats", get(api::list_chats).post(api::create_chat))
         .route(

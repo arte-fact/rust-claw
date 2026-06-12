@@ -17,6 +17,16 @@
       <a class="chat-files" href="/chats/{{ platform_id }}">← chat</a>
     </header>
     <nav class="fs-breadcrumb" id="fs-breadcrumb"></nav>
+    <div class="fs-toolbar">
+      <button type="button" class="fs-tool" id="fs-new-file">+ file</button>
+      <button type="button" class="fs-tool" id="fs-new-folder">+ folder</button>
+      <button type="button" class="fs-tool" id="fs-upload">upload</button>
+      <input type="file" id="fs-upload-input" hidden>
+      <form class="fs-newname" id="fs-newname" hidden>
+        <input id="fs-newname-input" placeholder="name" autocomplete="off" spellcheck="false">
+      </form>
+      <span class="fs-msg" id="fs-msg"></span>
+    </div>
     <section class="fs-panes">
       <ul class="fs-list" id="fs-list"></ul>
       <article class="fs-viewer" id="fs-viewer">

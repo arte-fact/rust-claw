@@ -86,12 +86,17 @@ pub fn read_bytes(ws: &Workspace, rel: &str) -> Result<Vec<u8>, WorkspaceError> 
 
 /// Creates or overwrites a text file. Its parent directory must already exist.
 pub fn write_text(ws: &Workspace, rel: &str, content: &str) -> Result<(), WorkspaceError> {
+    write_bytes(ws, rel, content.as_bytes())
+}
+
+/// Creates or overwrites a file with raw bytes (uploads). Parent must already exist.
+pub fn write_bytes(ws: &Workspace, rel: &str, bytes: &[u8]) -> Result<(), WorkspaceError> {
     let target = mutable_target(ws, rel)?;
     match target.parent() {
         Some(parent) if parent.is_dir() => {}
         _ => return Err(WorkspaceError::NotFound),
     }
-    std::fs::write(&target, content)?;
+    std::fs::write(&target, bytes)?;
     Ok(())
 }
 
@@ -212,6 +217,14 @@ mod tests {
             write_text(&ws, "missing/note.md", "x"),
             Err(WorkspaceError::NotFound)
         ));
+    }
+
+    #[test]
+    fn write_bytes_roundtrips_binary_through_read_bytes() {
+        let (_tmp, ws) = workspace();
+        let blob = [0u8, 1, 2, 255, 254];
+        write_bytes(&ws, "upload.bin", &blob).expect("write");
+        assert_eq!(read_bytes(&ws, "upload.bin").expect("read"), blob);
     }
 
     #[test]

@@ -228,8 +228,15 @@ browser is jailed to one agent's folder server-side — the client is never trus
       oversize ⇒ 415, traversal ⇒ 400). `claw.js` browser (breadcrumb + dir nav + `<pre>` viewer,
       names escaped before innerHTML) + `.fs-*` tokens-only CSS (incl. a mobile stack). Unit test
       for the coder gate; verified end-to-end over HTTP + Playwright. Screenshot: `files.png`. (§11)
-- [ ] **11.3 Mutations.** `write`/`mkdir`/`delete`(confirm)/`rename`/`upload`(axum `multipart`
-      feature)/raw download routes; editor + toolbar in `files.html`/`claw.js`; refresh `files.png`.
+- [x] **11.3 Mutations.** Routes (all `coder_folder`-gated + jailed): `POST …/files/{write,mkdir,
+      rename,delete}` (JSON), `POST …/files/upload?path=` (raw `Bytes` body — chosen over the `axum`
+      `multipart` feature, so **no Cargo change**; 32 MiB `DefaultBodyLimit`), and
+      `GET /chats/{id}/files/raw?path=` (download, `Content-Disposition` attachment). `ops` gained
+      `write_bytes` (binary uploads; `write_text` now delegates to it). UI: a directory toolbar
+      (+ file / + folder / upload, one shared inline name input), hover ✎ rename / ✕ delete with an
+      inline two-step confirm (no native dialogs), and a `<textarea>` editor with save + download.
+      Verified every endpoint over HTTP (write/read, mkdir + 409, rename, upload, download, delete,
+      escape→400, root→400) + Playwright; refreshed `screenshots/files.png`. (§11)
 
 Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
 the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for
