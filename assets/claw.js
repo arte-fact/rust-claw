@@ -309,6 +309,83 @@
     navigate('');
   }
 
+  // Log viewer (admin → logs): renders the server snapshot, then live-appends new
+  // records from the SSE stream. Level/target/search filters and pause/clear are
+  // applied client-side over the in-DOM lines.
+  const logView = document.getElementById('log-view');
+  if (logView) {
+    const levelSel = document.getElementById('log-level');
+    const targetInput = document.getElementById('log-target');
+    const searchInput = document.getElementById('log-search');
+    const pauseBtn = document.getElementById('log-pause');
+    const clearBtn = document.getElementById('log-clear');
+    const RANK = { ERROR: 4, WARN: 3, INFO: 2, DEBUG: 1, TRACE: 0 };
+    const MAX_LINES = 2000;
+    let paused = false;
+
+    const escapeHtml = (text) =>
+      text.replace(/[&<>"']/g, (ch) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
+    const matches = (line) => {
+      const min = levelSel.value;
+      if (min && (RANK[line.dataset.level] ?? 0) < (RANK[min] ?? 0)) return false;
+      const target = targetInput.value.trim().toLowerCase();
+      if (target && !line.dataset.target.toLowerCase().includes(target)) return false;
+      const search = searchInput.value.trim().toLowerCase();
+      if (search && !line.textContent.toLowerCase().includes(search)) return false;
+      return true;
+    };
+
+    const applyFilters = () => {
+      for (const line of logView.children) line.hidden = !matches(line);
+    };
+
+    const atBottom = () =>
+      logView.scrollHeight - logView.scrollTop - logView.clientHeight < 40;
+
+    const append = (record) => {
+      const pinned = atBottom();
+      const line = document.createElement('div');
+      line.className = `log-line log-${record.level.toLowerCase()}`;
+      line.dataset.level = record.level;
+      line.dataset.target = record.target;
+      const time = record.ts.substring(11, 19);
+      line.innerHTML =
+        `<span class="log-time">${time}</span>` +
+        `<span class="log-level">${record.level}</span>` +
+        `<span class="log-target">${escapeHtml(record.target)}</span>` +
+        `<span class="log-msg">${escapeHtml(record.message)}</span>`;
+      line.hidden = !matches(line);
+      logView.appendChild(line);
+      while (logView.childElementCount > MAX_LINES) logView.removeChild(logView.firstElementChild);
+      if (pinned && !line.hidden) logView.scrollTop = logView.scrollHeight;
+    };
+
+    levelSel.addEventListener('change', applyFilters);
+    targetInput.addEventListener('input', applyFilters);
+    searchInput.addEventListener('input', applyFilters);
+    clearBtn.addEventListener('click', () => { logView.replaceChildren(); });
+    pauseBtn.addEventListener('click', () => {
+      paused = !paused;
+      pauseBtn.textContent = paused ? 'resume' : 'pause';
+      pauseBtn.classList.toggle('log-paused', paused);
+    });
+
+    const connectLogs = () => {
+      const source = new EventSource('/admin/logs/stream');
+      source.addEventListener('log', (event) => {
+        if (paused) return;
+        append(JSON.parse(event.data));
+      });
+      source.onerror = () => { source.close(); setTimeout(connectLogs, 2000); };
+    };
+
+    applyFilters();
+    logView.scrollTop = logView.scrollHeight;
+    connectLogs();
+  }
+
   connect();
   scrollToBottom();
 })();

@@ -18,6 +18,7 @@ use super::api::ApiError;
 struct TasksPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
+    logs_active: bool,
     tasks: Vec<TaskRow>,
 }
 
@@ -38,6 +39,7 @@ pub async fn page(State(state): State<WebState>) -> Result<Response, ApiError> {
     Ok(render(&TasksPage {
         resources,
         tasks_active: true,
+        logs_active: false,
         tasks,
     }))
 }

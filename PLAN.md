@@ -275,6 +275,32 @@ backed by a headless Chromium — into the native loop as the first `src/mcp/` c
       live `search` result (`content` text blocks); booting claw with the binary on PATH logs
       `web-search mcp server connected tools=4`.
 
+## M13 — Log viewer in the admin section
+
+A live `/admin/logs` view so an operator can watch the daemon from the web UI (no shell / `docker
+logs`). Source: an in-memory ring buffer (last ~1000 records) filled by a custom `tracing` layer;
+`logs/claw.log` keeps the durable history. New lines stream over SSE. Controls: level filter
+(colour-coded), text search, target/module filter, pause + clear.
+
+- [x] **13.1 In-memory log buffer + tracing layer** (`src/logs.rs`). `LogRecord { seq, ts, level,
+      target, message }` (`Serialize`, `time()` → `HH:MM:SS`); `LogBuffer` = `Mutex<VecDeque>` + own
+      `broadcast::Sender` + `AtomicU64` seq + cap (`push` → trim front → broadcast; `snapshot`;
+      `subscribe`). `LogLayer` impls `tracing_subscriber::Layer` (`on_event` → metadata + a `Visit`
+      that grabs `message` and appends other fields as `key=value`). `logging::init` returns
+      `(WorkerGuard, Arc<LogBuffer>)` and `.with(LogLayer)`; `main.rs::serve` threads it into
+      `app::build_with_logs`; `build(config)` stays as a default-buffer wrapper so test callers are
+      untouched; `WebState.logs`. Tests: capacity eviction, snapshot order + seq, subscribe delivery.
+- [x] **13.2 Admin logs page + SSE + UI.** `src/web/logs.rs`: `page` (snapshot + nav, `logs_active`)
+      and `stream` (`BroadcastStream(subscribe)` → `Sse`, one `log` event per record, mirrors
+      `sse::events`). Routes `GET /admin/logs` + `/admin/logs/stream`; **logs** nav entry in
+      `admin-nav.html` (+ `logs_active` on `AdminPage`/`TasksPage`). `templates/logs.html` (toolbar:
+      min-level / module / search + pause/clear; server-rendered snapshot lines, auto-escaped).
+      `claw.js` logs controller (EventSource → append + level∧target∧search filter + 2000-line cap +
+      pinned autoscroll/pause/clear). `claw.css` `.log-*` tokens-only (levels →
+      `--color-error`/`--color-pending`/`--color-accent-2`/`--color-text-faint`). Verified
+      end-to-end (snapshot render, structured fields captured, **live ERROR streamed in over SSE**,
+      level filter 6→2); `screenshots/logs.png`; ARCHITECTURE §4 entry. (§4)
+
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);
 cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

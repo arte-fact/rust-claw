@@ -137,6 +137,9 @@ rust-claw/
     mcp/                  # stdio MCP client (M12): conn.rs (newline-delimited JSON-RPC
                           # over a child's stdin/stdout) + McpClient (spawn, handshake,
                           # list/call). Tools namespaced <server>__<tool> for every agent.
+    logs.rs               # in-memory ring buffer + tracing Layer (M13): the last ~1000
+                          # records, broadcast to the /admin/logs live viewer; claw.log
+                          # keeps the durable history
     delivery.rs           # messages_out polling, system actions, channel dispatch
     sweep.rs              # 60s: due schedules → enqueue, recurrence advance, watchdog
     channels/

@@ -44,14 +44,14 @@ fn admin(argv: &[String]) -> anyhow::Result<()> {
 
 fn serve() -> anyhow::Result<()> {
     let config = Config::from_env()?;
-    let _log_guard = logging::init(&config.logs_dir())?;
+    let (_log_guard, logs) = logging::init(&config.logs_dir())?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(config))
+        .block_on(run(config, logs))
 }
 
-async fn run(config: Config) -> anyhow::Result<()> {
+async fn run(config: Config, logs: std::sync::Arc<claw::logs::LogBuffer>) -> anyhow::Result<()> {
     tracing::info!(
         data_dir = %config.data_dir.display(),
         port = config.port,
@@ -67,7 +67,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         tokio::time::sleep(backoff).await;
     }
 
-    let app = claw::app::build(&config).await?;
+    let app = claw::app::build_with_logs(&config, logs).await?;
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, config.port)).await?;
     tracing::info!(port = config.port, "web interface listening");

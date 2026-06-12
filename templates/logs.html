@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw — logs</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  {% include "admin-nav.html" %}
+  <main class="chat admin logs">
+    <header class="chat-header">
+      <h1>logs</h1>
+      <div class="log-controls">
+        <select id="log-level" title="minimum level">
+          <option value="">all</option>
+          <option value="ERROR">error</option>
+          <option value="WARN">warn+</option>
+          <option value="INFO">info+</option>
+          <option value="DEBUG">debug+</option>
+        </select>
+        <input id="log-target" placeholder="module…" autocomplete="off" spellcheck="false">
+        <input id="log-search" placeholder="search…" autocomplete="off" spellcheck="false">
+        <button type="button" id="log-pause">pause</button>
+        <button type="button" id="log-clear">clear</button>
+      </div>
+    </header>
+    <div class="log-view" id="log-view">
+      {% for line in lines %}
+      <div class="log-line log-{{ line.level|lower }}" data-level="{{ line.level }}" data-target="{{ line.target }}">
+        <span class="log-time">{{ line.time() }}</span>
+        <span class="log-level">{{ line.level }}</span>
+        <span class="log-target">{{ line.target }}</span>
+        <span class="log-msg">{{ line.message }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </main>
+</div>
+<script src="/assets/claw.js"></script>
+</body>
+</html>

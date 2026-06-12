@@ -330,6 +330,40 @@ button:disabled { opacity: 0.5; cursor: default; }
 .fs-hint { color: var(--color-text-muted); }
 .fs-error { color: var(--color-error); }
 
+/* ── log viewer ────────────────────────────────────────────────────── */
+
+.log-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-left: auto; }
+.log-controls select,
+.log-controls input,
+.log-controls button { font-size: var(--text-xs); padding: var(--space-1) var(--space-2); }
+.log-controls input { width: 9rem; }
+.log-paused { color: var(--color-pending); border-color: var(--color-pending); }
+
+.log-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.log-line { display: flex; gap: var(--space-3); padding: 1px 0; }
+.log-time { flex: 0 0 auto; color: var(--color-text-faint); }
+.log-level { flex: 0 0 3em; font-weight: 700; color: var(--color-accent-2); }
+.log-target {
+  flex: 0 0 auto;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+}
+.log-msg { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--color-text); }
+.log-error .log-level, .log-error .log-msg { color: var(--color-error); }
+.log-warn .log-level, .log-warn .log-msg { color: var(--color-pending); }
+.log-debug .log-level, .log-debug .log-msg,
+.log-trace .log-level, .log-trace .log-msg { color: var(--color-text-faint); }
+
 /* messages: left-aligned document flow, hanging meta — no bubbles */
 
 .msg { max-width: 72ch; }

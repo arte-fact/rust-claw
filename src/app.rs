@@ -48,7 +48,21 @@ impl App {
     }
 }
 
+/// Builds the daemon with a fresh, unfed log buffer — used by tests that don't
+/// initialise tracing. Production goes through [`build_with_logs`] so the admin
+/// log viewer shares the buffer the tracing layer fills.
 pub async fn build(config: &Config) -> Result<App, AppError> {
+    build_with_logs(
+        config,
+        crate::logs::LogBuffer::new(crate::logs::DEFAULT_CAPACITY),
+    )
+    .await
+}
+
+pub async fn build_with_logs(
+    config: &Config,
+    logs: Arc<crate::logs::LogBuffer>,
+) -> Result<App, AppError> {
     let central = {
         let path = config.central_db_path();
         Arc::new(blocking(move || CentralDb::open(&path)).await?)
@@ -132,6 +146,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
         store,
         timezone: config.timezone.clone(),
         groups_dir: config.groups_dir(),
+        logs,
     };
     Ok(App {
         http: build_app(state),

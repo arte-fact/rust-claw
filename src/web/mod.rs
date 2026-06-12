@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod files;
+pub mod logs;
 pub mod pages;
 pub mod render;
 pub mod sse;
@@ -37,6 +38,8 @@ pub struct WebState {
     pub timezone: String,
     /// Base of agent workspace folders, for the per-chat file browser (M11.2).
     pub groups_dir: std::path::PathBuf,
+    /// In-memory recent-log ring for the admin log viewer (M13).
+    pub logs: Arc<crate::logs::LogBuffer>,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -83,6 +86,8 @@ pub fn build_app(state: WebState) -> Router {
         .route("/admin", get(admin::index))
         .route("/admin/tasks", get(tasks::page))
         .route("/admin/tasks/action", axum::routing::post(tasks::action))
+        .route("/admin/logs", get(logs::page))
+        .route("/admin/logs/stream", get(logs::stream))
         .route("/admin/run", axum::routing::post(admin::run))
         .route("/admin/{resource}", get(admin::resource_page))
         .route_layer(middleware::from_fn_with_state(
@@ -117,6 +122,7 @@ mod tests {
             ))),
             timezone: "UTC".to_owned(),
             groups_dir: std::path::PathBuf::from("/tmp/claw-test/groups"),
+            logs: crate::logs::LogBuffer::new(crate::logs::DEFAULT_CAPACITY),
             central,
             hub,
         })

@@ -42,6 +42,7 @@ pub(super) fn resource_nav(state: &WebState, active: Option<&str>) -> Vec<NavIte
 struct AdminPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
+    logs_active: bool,
     current: String,
     error: Option<String>,
     /// Existing items as inline-editable (or read-only) rows.
@@ -138,6 +139,7 @@ pub async fn resource_page(
     let page = AdminPage {
         resources: resource_nav(&state, Some(current)),
         tasks_active: false,
+        logs_active: false,
         current: current.to_owned(),
         error: flash.error,
         rows,

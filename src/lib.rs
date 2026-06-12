@@ -11,6 +11,7 @@ pub mod db;
 pub mod delivery;
 pub mod engage;
 pub mod logging;
+pub mod logs;
 pub mod mcp;
 pub mod modules;
 pub mod protocol;
