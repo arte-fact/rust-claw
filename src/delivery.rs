@@ -4,11 +4,16 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::channels::{AdapterRegistry, Address, OutboundDelivery, OutboundFile};
-use crate::db::{CentralDb, DbError, approvals, questions, sessions};
-use crate::protocol::content::{Operation, OutboundContent, Routing};
-use crate::protocol::ids::{MessageOutId, SessionId};
-use crate::session::{OutboundMessage, SessionDb, SessionStore, SessionStoreError};
+use crate::channels::{
+    AGENT_CHANNEL_TYPE, AdapterRegistry, Address, OutboundDelivery, OutboundFile,
+};
+use crate::db::{CentralDb, DbError, agent_groups, approvals, questions, sessions};
+use crate::protocol::content::{ChatContent, Operation, OutboundContent, Routing};
+use crate::protocol::ids::{AgentGroupId, MessageOutId, SessionId};
+use crate::runs::queue::RunQueue;
+use crate::session::{
+    NewInboundMessage, OutboundMessage, SessionDb, SessionStore, SessionStoreError,
+};
 
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -27,6 +32,8 @@ pub struct Delivery {
     central: Arc<CentralDb>,
     store: Arc<SessionStore>,
     registry: Arc<AdapterRegistry>,
+    /// Enqueues a target agent's session when an agent-to-agent message lands.
+    queue: Arc<RunQueue>,
     /// In-memory: restarts reset the counters, giving failed messages fresh chances.
     attempts: Mutex<HashMap<MessageOutId, u32>>,
 }
@@ -37,11 +44,13 @@ impl Delivery {
         central: Arc<CentralDb>,
         store: Arc<SessionStore>,
         registry: Arc<AdapterRegistry>,
+        queue: Arc<RunQueue>,
     ) -> Self {
         Self {
             central,
             store,
             registry,
+            queue,
             attempts: Mutex::new(HashMap::new()),
         }
     }
@@ -166,6 +175,15 @@ impl Delivery {
         };
 
         let content = OutboundContent::parse(&message.content).map_err(|err| err.to_string())?;
+
+        // Agent-to-agent: not an external channel — inject into the target agent's
+        // session instead of looking up an adapter (which would never exist).
+        if channel_type == AGENT_CHANNEL_TYPE {
+            self.deliver_to_agent(session, &address.platform_id, &content)
+                .await?;
+            return Ok(None);
+        }
+
         match &content.operation {
             Some(Operation::AskQuestion {
                 question_id,
@@ -287,6 +305,75 @@ impl Delivery {
         .await
         .map_err(|err| err.to_string())
     }
+
+    /// Delivers an agent-to-agent message by writing it as an inbound chat into the
+    /// target group's session (creating one if needed) and enqueuing a run — the
+    /// same machinery the router uses, so "everything is a message" still holds. The
+    /// inbound's routing points back at the sender so the target can reply (§8.6).
+    async fn deliver_to_agent(
+        &self,
+        source: &sessions::Session,
+        target_group: &str,
+        content: &OutboundContent,
+    ) -> Result<(), String> {
+        let central = self.central.clone();
+        let store = self.store.clone();
+        let target_group = AgentGroupId::new(target_group.to_owned());
+        let source_group = source.agent_group_id.clone();
+        let text = content.text.clone().unwrap_or_default();
+
+        let target_label = target_group.clone();
+        let session_id = blocking(move || -> Result<Option<SessionId>, DeliveryError> {
+            let Some(sender) = central
+                .with(|conn| Ok(agent_groups::get(conn, &source_group)?.map(|group| group.name)))?
+            else {
+                return Ok(None);
+            };
+            let session = central.with(|conn| {
+                if agent_groups::get(conn, &target_group)?.is_none() {
+                    return Ok(None);
+                }
+                match sessions::find_active(conn, &target_group, None, None)? {
+                    Some(session) => Ok(Some(session)),
+                    None => sessions::create(conn, &target_group, None, None).map(Some),
+                }
+            })?;
+            let Some(session) = session else {
+                return Ok(None);
+            };
+
+            let routing = Routing {
+                channel_type: Some(AGENT_CHANNEL_TYPE.to_owned()),
+                platform_id: Some(source_group.as_str().to_owned()),
+                thread_id: None,
+            };
+            let chat = ChatContent {
+                sender,
+                sender_id: None,
+                text,
+                attachments: Vec::new(),
+                is_from_me: false,
+                quoted: None,
+            };
+            let body = serde_json::to_string(&chat).map_err(|err| {
+                DbError::Sqlite(rusqlite::Error::ToSqlConversionFailure(err.into()))
+            })?;
+            let db = store.init(&session.agent_group_id, &session.id)?;
+            db.write_routing(&routing)?;
+            db.write_message(&NewInboundMessage::chat(body, routing))?;
+            Ok(Some(session.id))
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+
+        match session_id {
+            Some(session_id) => {
+                self.queue.enqueue(session_id);
+                Ok(())
+            }
+            None => Err(format!("unknown target agent group {target_label:?}")),
+        }
+    }
 }
 
 async fn blocking<T, E>(
@@ -392,6 +479,7 @@ mod tests {
         adapter: Arc<RecordingAdapter>,
         store: Arc<SessionStore>,
         central: Arc<CentralDb>,
+        queue: Arc<crate::runs::queue::RunQueue>,
         session: sessions::Session,
         _tmp: tempfile::TempDir,
     }
@@ -412,11 +500,13 @@ mod tests {
             ..RecordingAdapter::default()
         });
         let registry = Arc::new(AdapterRegistry::new(vec![adapter.clone()]));
+        let queue = Arc::new(crate::runs::queue::RunQueue::new());
         Fixture {
-            delivery: Delivery::new(central.clone(), store.clone(), registry),
+            delivery: Delivery::new(central.clone(), store.clone(), registry, queue.clone()),
             adapter,
             store,
             central,
+            queue,
             session,
             _tmp: tmp,
         }
@@ -488,6 +578,66 @@ mod tests {
         assert_eq!(
             registered.options,
             vec!["ship".to_owned(), "wait".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_channel_message_routes_into_the_target_session_not_an_adapter() {
+        let fix = fixture(0);
+        let target = fix
+            .central
+            .with(|conn| Ok(agent_groups::create(conn, "Coder", "coder")?.id))
+            .expect("target group");
+
+        // The source (Andy) sends to the Coder group via the "agent" channel.
+        write_reply(
+            &fix,
+            "please review the PR",
+            Routing {
+                channel_type: Some(AGENT_CHANNEL_TYPE.to_owned()),
+                platform_id: Some(target.as_str().to_owned()),
+                thread_id: None,
+            },
+        );
+
+        fix.delivery.drain_all().await.expect("drain");
+
+        // It must NOT have gone to a channel adapter.
+        assert!(
+            fix.adapter.seen.lock().expect("lock").is_empty(),
+            "agent message must not reach the channel adapter"
+        );
+
+        // The Coder group now has an active session carrying the inbound chat.
+        let target_session = fix
+            .central
+            .with(|conn| sessions::find_active(conn, &target, None, None))
+            .expect("query")
+            .expect("target session created");
+        let target_db = fix
+            .store
+            .open(&target_session.agent_group_id, &target_session.id)
+            .expect("open");
+        let transcript = target_db.transcript(10).expect("transcript");
+        let inbound = transcript
+            .iter()
+            .find(|entry| entry.inbound)
+            .expect("an inbound landed");
+        assert!(inbound.content.contains("please review the PR"));
+        assert!(inbound.content.contains("Andy"), "sender labelled");
+
+        // And the target session is enqueued for a run.
+        assert!(
+            fix.queue.snapshot().contains(&target_session.id),
+            "target session enqueued"
+        );
+
+        // The source's outbound is delivered (no retry / no longer due).
+        let src_db = session_db(&fix);
+        let now = src_db.now_timestamp().expect("now");
+        assert!(
+            src_db.due_outbound(&now).expect("due").is_empty(),
+            "agent message marked delivered"
         );
     }
 

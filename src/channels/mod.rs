@@ -11,6 +11,11 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::content::OutboundContent;
 use crate::router::InboundEvent;
 
+/// Internal pseudo-channel for agent-to-agent messages (`send_to_agent`). These
+/// never reach a `ChannelAdapter`; delivery injects them into the target agent's
+/// session instead (§8.6).
+pub const AGENT_CHANNEL_TYPE: &str = "agent";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
     #[error("operation not supported by this channel")]

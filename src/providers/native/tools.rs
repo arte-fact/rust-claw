@@ -655,7 +655,7 @@ fn send_to_agent(db: &SessionDb, arguments: &str) -> ToolOutcome {
         Err(err) => return ToolOutcome::note(format!("error: {err}")),
     };
     let routing = Routing {
-        channel_type: Some("agent".to_owned()),
+        channel_type: Some(crate::channels::AGENT_CHANNEL_TYPE.to_owned()),
         platform_id: Some(args.agent_group),
         thread_id: None,
     };

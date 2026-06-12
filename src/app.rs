@@ -118,7 +118,12 @@ pub async fn build_with_logs(
     );
     tasks.spawn(supervisor.run(cancel.clone()));
 
-    let delivery = Arc::new(Delivery::new(central.clone(), store.clone(), registry));
+    let delivery = Arc::new(Delivery::new(
+        central.clone(),
+        store.clone(),
+        registry,
+        queue.clone(),
+    ));
     tasks.spawn(delivery.run(cancel.clone()));
 
     let sweep = Arc::new(crate::sweep::Sweep::new(
