@@ -49,6 +49,8 @@ pub struct QueryInput {
     pub tool_profile: crate::protocol::entities::ToolProfile,
     /// In-chat admin access, when the group's `cli_scope` permits it.
     pub admin: Option<AgentAdmin>,
+    /// Shared MCP server, when one is connected — its tools go to every agent (M12).
+    pub mcp: Option<Arc<crate::mcp::McpClient>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

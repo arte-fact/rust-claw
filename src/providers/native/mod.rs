@@ -73,11 +73,16 @@ async fn run_turn(client: &ChatClient, input: &QueryInput) -> Result<(), TurnErr
     let db = open_session_db(input.session_dir.clone()).await?;
     let system_prompt = read_agent_md(&input.cwd);
     let mut messages = initial_messages(db.clone(), system_prompt).await?;
-    let tools = tools::definitions(input.tool_profile, input.admin.is_some());
+    let tools = tools::definitions(
+        input.tool_profile,
+        input.admin.is_some(),
+        input.mcp.as_deref(),
+    );
     let tool_context = tools::ToolContext {
         workspace: input.cwd.clone(),
         profile: input.tool_profile,
         admin: input.admin.clone(),
+        mcp: input.mcp.clone(),
     };
     let mut produced_message = false;
 

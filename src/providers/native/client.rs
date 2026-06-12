@@ -84,15 +84,15 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     #[must_use]
     pub fn function(
-        name: &'static str,
-        description: &'static str,
+        name: impl Into<std::borrow::Cow<'static, str>>,
+        description: impl Into<std::borrow::Cow<'static, str>>,
         parameters: serde_json::Value,
     ) -> Self {
         Self {
             tool_type: "function",
             function: FunctionDefinition {
-                name,
-                description,
+                name: name.into(),
+                description: description.into(),
                 parameters,
             },
         }
@@ -101,8 +101,8 @@ impl ToolDefinition {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FunctionDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
+    pub description: std::borrow::Cow<'static, str>,
     pub parameters: serde_json::Value,
 }
 

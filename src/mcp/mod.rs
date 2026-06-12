@@ -63,6 +63,15 @@ pub struct McpClient {
     _child: Child,
 }
 
+impl std::fmt::Debug for McpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpClient")
+            .field("server_name", &self.server_name)
+            .field("tools", &self.tools.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl McpClient {
     /// Spawns `command`, performs the MCP handshake, and caches its tool list.
     /// Any failure (missing binary, bad handshake) is returned so the caller can

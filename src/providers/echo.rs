@@ -55,6 +55,7 @@ mod tests {
             inference: None,
             tool_profile: crate::protocol::entities::ToolProfile::Chat,
             admin: None,
+            mcp: None,
         }
     }
 

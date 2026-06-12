@@ -83,17 +83,20 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
 
     let commands = Arc::new(crate::commands::Registry::new(central.clone()));
 
-    let supervisor = Arc::new(Supervisor::new(
-        central.clone(),
-        store.clone(),
-        queue.clone(),
-        commands.clone(),
-        crate::runs::supervisor::RunConfig {
-            groups_dir: config.groups_dir(),
-            default_endpoint: config.default_endpoint.clone(),
-            default_model: config.default_model.clone(),
-        },
-    ));
+    let supervisor = Arc::new(
+        Supervisor::new(
+            central.clone(),
+            store.clone(),
+            queue.clone(),
+            commands.clone(),
+            crate::runs::supervisor::RunConfig {
+                groups_dir: config.groups_dir(),
+                default_endpoint: config.default_endpoint.clone(),
+                default_model: config.default_model.clone(),
+            },
+        )
+        .with_mcp(connect_web_mcp().await),
+    );
     tasks.spawn(supervisor.run(cancel.clone()));
 
     let delivery = Arc::new(Delivery::new(central.clone(), store.clone(), registry));
@@ -174,6 +177,25 @@ fn resolve_auth_token(config: &Config) -> Result<String, AppError> {
         "CLAW_AUTH_TOKEN not set — generated and saved a login token; set CLAW_AUTH_TOKEN to override"
     );
     Ok(token)
+}
+
+/// Spawns the bundled web-search MCP server (M12) — best-effort: if the binary is
+/// missing or the handshake fails, agents simply run without the web tools.
+async fn connect_web_mcp() -> Option<Arc<crate::mcp::McpClient>> {
+    use crate::mcp::{McpClient, WEB_SERVER_COMMAND, WEB_SERVER_NAME};
+    match McpClient::spawn(WEB_SERVER_NAME, WEB_SERVER_COMMAND, &[]).await {
+        Ok(client) => {
+            tracing::info!(
+                tools = client.tools().len(),
+                "web-search mcp server connected"
+            );
+            Some(Arc::new(client))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "web-search mcp server unavailable; agents run without web tools");
+            None
+        }
+    }
 }
 
 /// First boot on an empty database: one agent group so chats have a target.

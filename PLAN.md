@@ -256,13 +256,15 @@ backed by a headless Chromium — into the native loop as the first `src/mcp/` c
       is single-session); `qualify`/`dequalify` give `<server>__<tool>` namespacing. `McpError`
       (thiserror); a failed spawn is returned so the caller runs without it. Tests: full
       handshake/list/call round-trip over `tokio::io::duplex` mock + flatten + namespacing.
-- [ ] **12.2 Bridge MCP tools into the native loop.** `ToolDefinition`/`FunctionDefinition`
-      (`providers/native/client.rs`) → owned strings (`Cow<'static, str>`), fixing native call sites.
-      `ToolContext` (`tools.rs`) gains `mcp: Option<Arc<McpClient>>`; `definitions(profile,
-      admin_enabled, mcp)` appends namespaced MCP tool defs **for every agent**; `dispatch()` gets a
-      fallback branch routing `<server>__<tool>` to `McpClient::call_tool` (errors → result strings,
-      never panics the loop — mirrors the admin tool). `app.rs` builds the shared client at boot and
-      threads it `Supervisor` → `QueryInput` (`providers/mod.rs`) → `ToolContext` — no gating.
+- [x] **12.2 Bridge MCP tools into the native loop.** `FunctionDefinition`
+      (`providers/native/client.rs`) name/description → `Cow<'static, str>` (call sites unchanged via
+      `impl Into`). `ToolContext` + `QueryInput` gain `mcp: Option<Arc<McpClient>>` (manual `Debug`
+      on `McpClient`); `definitions(profile, admin_enabled, mcp)` appends namespaced MCP defs **for
+      every agent** (`mcp_definitions(server, tools)` pure + tested, null schema → `{type:object}`);
+      `dispatch()` routes `<server>__<tool>` to `McpClient::call` (errors → result strings, never
+      panics — mirrors admin). `app.rs::connect_web_mcp` spawns the client best-effort at boot and
+      `Supervisor::with_mcp` threads it → `QueryInput` → `ToolContext` (a failed spawn ⇒ `None`, no
+      gating). ARCHITECTURE §4 `mcp/` entry added.
 - [ ] **12.3 Dockerfile + docs.** Builder stage clones + `cargo build --release`s the stdio binary,
       copies `mcp-web-search-stdio` into the runtime image; runtime stage apt-installs `chromium` +
       shared libs and sets the Chrome-path env the binary expects. Enabled by default (no env to add).

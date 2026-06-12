@@ -134,6 +134,9 @@ rust-claw/
         exec.rs           #     bash tool (workspace cwd, timeout, output truncation)
         files.rs          #     read / write / edit (coder profile)
       echo.rs             #   no-network test provider
+    mcp/                  # stdio MCP client (M12): conn.rs (newline-delimited JSON-RPC
+                          # over a child's stdin/stdout) + McpClient (spawn, handshake,
+                          # list/call). Tools namespaced <server>__<tool> for every agent.
     delivery.rs           # messages_out polling, system actions, channel dispatch
     sweep.rs              # 60s: due schedules → enqueue, recurrence advance, watchdog
     channels/

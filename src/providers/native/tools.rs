@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::mcp::{McpClient, McpTool, dequalify, qualify};
 use crate::protocol::content::{Operation, OutboundContent, Routing};
 use crate::protocol::entities::ToolProfile;
 use crate::protocol::frame::RequestFrame;
@@ -27,19 +28,26 @@ pub const READ: &str = "read";
 pub const WRITE: &str = "write";
 pub const EDIT: &str = "edit";
 
-/// What a tool call may touch: the group workspace (gated by profile) and, when
-/// the group's `cli_scope` permits, the admin command surface (§8.7, M6.4).
+/// What a tool call may touch: the group workspace (gated by profile), the admin
+/// command surface when `cli_scope` permits (§8.7, M6.4), and the shared MCP
+/// server's tools (M12) — exposed to every agent.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
     pub profile: ToolProfile,
     pub admin: Option<AgentAdmin>,
+    pub mcp: Option<Arc<McpClient>>,
 }
 
 /// Tool surface (§8.5): messaging for everyone; bash/files for coders; the `admin`
-/// command tool whenever `cli_scope` is not `disabled` (independent of profile).
+/// command tool whenever `cli_scope` is not `disabled` (independent of profile);
+/// the MCP server's tools for everyone when one is connected (M12).
 #[must_use]
-pub fn definitions(profile: ToolProfile, admin_enabled: bool) -> Vec<ToolDefinition> {
+pub fn definitions(
+    profile: ToolProfile,
+    admin_enabled: bool,
+    mcp: Option<&McpClient>,
+) -> Vec<ToolDefinition> {
     let mut tools = messaging_definitions();
     if profile == ToolProfile::Coder {
         tools.extend(coder_definitions());
@@ -47,7 +55,31 @@ pub fn definitions(profile: ToolProfile, admin_enabled: bool) -> Vec<ToolDefinit
     if admin_enabled {
         tools.push(admin_definition());
     }
+    if let Some(client) = mcp {
+        tools.extend(mcp_definitions(client.server_name(), client.tools()));
+    }
     tools
+}
+
+/// Turns a server's tools into model-facing definitions, names namespaced as
+/// `<server>__<tool>` so they can't collide with native tools. A tool with no
+/// input schema gets a permissive empty-object one.
+fn mcp_definitions(server: &str, tools: &[McpTool]) -> Vec<ToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| {
+            let parameters = if tool.input_schema.is_null() {
+                json!({ "type": "object" })
+            } else {
+                tool.input_schema.clone()
+            };
+            ToolDefinition::function(
+                qualify(server, &tool.name),
+                tool.description.clone(),
+                parameters,
+            )
+        })
+        .collect()
 }
 
 fn admin_definition() -> ToolDefinition {
@@ -246,6 +278,12 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
             "error: {name} is not available in this agent group"
         ));
     }
+    if let Some((server, tool)) = dequalify(name)
+        && let Some(client) = &context.mcp
+        && client.server_name() == server
+    {
+        return run_mcp(client, tool, &call.function.arguments).await;
+    }
     match name {
         ADMIN => match &context.admin {
             Some(admin) => run_admin(db, admin, &call.function.arguments).await,
@@ -268,6 +306,16 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
                 .await
                 .unwrap_or_else(|err| ToolOutcome::note(format!("error: tool task failed: {err}")))
         }
+    }
+}
+
+/// Forwards a namespaced tool call to the MCP server. Bad arguments or a server
+/// error become a result string the model can react to — never a turn failure.
+async fn run_mcp(client: &McpClient, tool: &str, arguments: &str) -> ToolOutcome {
+    let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    match client.call(tool, args).await {
+        Ok(text) => ToolOutcome::note(text),
+        Err(err) => ToolOutcome::note(format!("error: {tool} failed: {err}")),
     }
 }
 
@@ -641,25 +689,52 @@ mod tests {
             workspace: tmp.path().to_path_buf(),
             profile,
             admin: None,
+            mcp: None,
         };
         (tmp, Arc::new(db), context)
     }
 
+    fn tool_names(tools: &[ToolDefinition]) -> Vec<&str> {
+        tools
+            .iter()
+            .map(|tool| tool.function.name.as_ref())
+            .collect()
+    }
+
     #[test]
     fn coder_profile_adds_execution_tools_to_the_chat_surface() {
-        let chat: Vec<&str> = definitions(ToolProfile::Chat, false)
-            .iter()
-            .map(|tool| tool.function.name)
-            .collect();
-        let coder: Vec<&str> = definitions(ToolProfile::Coder, false)
-            .iter()
-            .map(|tool| tool.function.name)
-            .collect();
+        let chat = definitions(ToolProfile::Chat, false, None);
+        let chat = tool_names(&chat);
+        let coder = definitions(ToolProfile::Coder, false, None);
+        let coder = tool_names(&coder);
         for tool in [BASH, READ, WRITE, EDIT] {
             assert!(!chat.contains(&tool), "{tool} must not be in chat");
             assert!(coder.contains(&tool), "{tool} must be in coder");
         }
         assert!(coder.contains(&SEND_MESSAGE), "messaging tools stay");
+    }
+
+    #[test]
+    fn mcp_tools_are_namespaced_and_default_their_schema() {
+        let tools = vec![
+            McpTool {
+                name: "search".to_owned(),
+                description: "web search".to_owned(),
+                input_schema: json!({ "type": "object", "properties": { "q": { "type": "string" } } }),
+            },
+            McpTool {
+                name: "fetch".to_owned(),
+                description: "get a url".to_owned(),
+                input_schema: Value::Null,
+            },
+        ];
+        let defs = mcp_definitions("web", &tools);
+        assert_eq!(tool_names(&defs), ["web__search", "web__fetch"]);
+        assert_eq!(
+            defs[0].function.parameters["properties"]["q"]["type"],
+            "string"
+        );
+        assert_eq!(defs[1].function.parameters, json!({ "type": "object" }));
     }
 
     #[tokio::test]
@@ -892,16 +967,10 @@ mod tests {
 
     #[test]
     fn admin_tool_appears_only_when_enabled() {
-        let without: Vec<&str> = definitions(ToolProfile::Chat, false)
-            .iter()
-            .map(|tool| tool.function.name)
-            .collect();
-        assert!(!without.contains(&ADMIN));
-        let with: Vec<&str> = definitions(ToolProfile::Chat, true)
-            .iter()
-            .map(|tool| tool.function.name)
-            .collect();
-        assert!(with.contains(&ADMIN));
+        let without = definitions(ToolProfile::Chat, false, None);
+        assert!(!tool_names(&without).contains(&ADMIN));
+        let with = definitions(ToolProfile::Chat, true, None);
+        assert!(tool_names(&with).contains(&ADMIN));
     }
 
     #[tokio::test]
@@ -933,6 +1002,7 @@ mod tests {
             workspace: std::path::PathBuf::from("."),
             profile: ToolProfile::Chat,
             admin: Some(admin.clone()),
+            mcp: None,
         };
         (context, admin)
     }

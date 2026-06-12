@@ -52,6 +52,7 @@ pub struct Supervisor {
     config: RunConfig,
     factory: ProviderFactory,
     batch_limit: i64,
+    mcp: Option<Arc<crate::mcp::McpClient>>,
 }
 
 impl Supervisor {
@@ -90,7 +91,16 @@ impl Supervisor {
             config,
             factory,
             batch_limit: 10,
+            mcp: None,
         }
+    }
+
+    /// Attaches a connected MCP server whose tools every agent gets (M12). Builder
+    /// so the existing constructors and their test callers stay unchanged.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Option<Arc<crate::mcp::McpClient>>) -> Self {
+        self.mcp = mcp;
+        self
     }
 
     /// The single run consumer: pops sessions one at a time, forever.
@@ -156,6 +166,7 @@ impl Supervisor {
                 inference: inference.clone(),
                 tool_profile: group.tool_profile,
                 admin: self.agent_admin(&session, &group),
+                mcp: self.mcp.clone(),
             })?;
 
             match consume_run(run).await {
