@@ -4,8 +4,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::channels::AdapterRegistry;
 use crate::channels::web::WebChannel;
+use crate::channels::{AdapterRegistry, ChannelAdapter, ChannelError, build_adapters};
 use crate::config::Config;
 use crate::db::{CentralDb, DbError, agent_groups};
 use crate::delivery::Delivery;
@@ -32,6 +32,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    Channel(#[from] ChannelError),
 }
 
 /// The fully wired daemon: an HTTP app plus the background task set.
@@ -74,7 +76,9 @@ pub async fn build_with_logs(
     let queue = Arc::new(RunQueue::new());
     let hub = Hub::new();
     let web_channel = Arc::new(WebChannel::new(central.clone(), hub.clone()));
-    let registry = Arc::new(AdapterRegistry::new(vec![web_channel.clone()]));
+    let mut adapters: Vec<Arc<dyn ChannelAdapter>> = vec![web_channel.clone()];
+    adapters.extend(connector_adapters(&central).await?);
+    let registry = Arc::new(AdapterRegistry::new(adapters));
 
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -225,6 +229,17 @@ async fn connect_web_mcp() -> Option<Arc<crate::mcp::McpClient>> {
             None
         }
     }
+}
+
+/// Adapters for the enabled connector rows (M17) — restart applies changes.
+async fn connector_adapters(
+    central: &Arc<CentralDb>,
+) -> Result<Vec<Arc<dyn ChannelAdapter>>, AppError> {
+    let rows = {
+        let central = central.clone();
+        blocking(move || central.with(crate::db::connectors::list)).await?
+    };
+    Ok(build_adapters(central, &rows)?)
 }
 
 /// First boot on an empty database: one agent group so chats have a target.

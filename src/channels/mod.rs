@@ -31,6 +31,8 @@ pub enum ChannelError {
     UnknownChannel(String),
     #[error("delivery failed: {0}")]
     Delivery(String),
+    #[error("adapter init failed: {0}")]
+    Init(String),
 }
 
 /// Where on a platform a message goes: conversation id plus optional thread.
@@ -96,6 +98,24 @@ pub trait ChannelAdapter: Send + Sync {
     }
 }
 
+/// One adapter per enabled connector row (§10). Exhaustive over
+/// `ConnectorConfig`: a new kind does not compile until it is built here.
+pub fn build_adapters(
+    central: &Arc<crate::db::CentralDb>,
+    connectors: &[crate::db::connectors::Connector],
+) -> Result<Vec<Arc<dyn ChannelAdapter>>, ChannelError> {
+    connectors
+        .iter()
+        .filter(|connector| connector.enabled)
+        .map(|connector| match &connector.config {
+            crate::protocol::entities::ConnectorConfig::Sms(config) => {
+                sms::SmsChannel::new(central.clone(), config)
+                    .map(|channel| Arc::new(channel) as Arc<dyn ChannelAdapter>)
+            }
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub struct AdapterRegistry {
     adapters: HashMap<&'static str, Arc<dyn ChannelAdapter>>,
@@ -120,5 +140,48 @@ impl AdapterRegistry {
 
     pub fn all(&self) -> impl Iterator<Item = &Arc<dyn ChannelAdapter>> {
         self.adapters.values()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{CentralDb, agent_groups, connectors};
+    use crate::protocol::entities::{ConnectorConfig, SmsConnectorConfig};
+
+    #[test]
+    fn build_adapters_skips_disabled_connectors() {
+        let central = Arc::new(CentralDb::open_in_memory().expect("central"));
+        let rows = central
+            .with(|conn| {
+                let group = agent_groups::create(conn, "Andy", "andy")?;
+                let config = ConnectorConfig::Sms(SmsConnectorConfig {
+                    base_url: "http://sim:8080".to_owned(),
+                    token: "sms_secret".to_owned(),
+                    webhook_secret: None,
+                });
+                let mut connector = connectors::create(conn, &config, &group.id, None)?;
+                connector.enabled = false;
+                connectors::update(conn, &connector)?;
+                connectors::list(conn)
+            })
+            .expect("rows");
+
+        let disabled = build_adapters(&central, &rows).expect("build");
+        assert!(disabled.is_empty(), "disabled rows must not build adapters");
+
+        let central2 = central.clone();
+        central2
+            .with(|conn| {
+                let mut connector = rows[0].clone();
+                connector.enabled = true;
+                connectors::update(conn, &connector)
+            })
+            .expect("enable");
+        let rows = central.with(connectors::list).expect("rows");
+        let enabled = build_adapters(&central, &rows).expect("build");
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].channel_type(), "sms");
+        assert!(!enabled[0].supports_threads());
     }
 }

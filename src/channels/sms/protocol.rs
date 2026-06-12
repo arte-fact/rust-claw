@@ -5,7 +5,7 @@ use crate::protocol::entities::ConnectorKind;
 use crate::protocol::message::MessageKind;
 use crate::router::InboundEvent;
 
-use super::OutboundDelivery;
+use crate::channels::OutboundDelivery;
 
 pub const CHANNEL_TYPE: &str = ConnectorKind::Sms.as_str();
 

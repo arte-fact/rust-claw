@@ -413,7 +413,7 @@ text-only). Amends the §1 non-goal (adapters whose transport is a plain HTTP AP
       approval → "approve in the web admin" — SMS sender identity is spoofable, not an
       authorization channel; files → "[N attachment(s) not deliverable over SMS]"). Tests:
       table-driven over all three + cursor round-trip.
-- [ ] **17.3 SmsChannel adapter + app wiring.** `run()`: first run (no cursor row) fetches
+- [x] **17.3 SmsChannel adapter + app wiring.** `run()`: first run (no cursor row) fetches
       `after_seq=0` and sets the cursor to max `Seq` **without routing** (no history flood);
       then ~2 s tick, per-message send-into-mpsc → persist cursor (at-least-once), exponential
       backoff 2 s→30 s on consecutive failures (401 once at ERROR), cancel-aware and
