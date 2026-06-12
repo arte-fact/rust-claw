@@ -9,43 +9,15 @@
 </head>
 <body>
 <div class="app">
-  <nav class="sidebar">
-    <div class="logo">claw</div>
-    <ul class="chat-list">
-      {% for chat in chats %}
-      <li>
-        <a class="chat-link{% if chat.active %} chat-link--active{% endif %}"
-           href="/chats/{{ chat.platform_id }}" data-chat="{{ chat.platform_id }}">
-          <span class="chat-dot"></span><span class="chat-name">{{ chat.label }}</span>
-        </a>
-      </li>
-      {% endfor %}
-    </ul>
-    <form class="new-chat" method="post" action="/chats">
-      <input name="name" placeholder="+ new chat" required autocomplete="off">
-    </form>
-    {% if !archived.is_empty() %}
-    <details class="archived">
-      <summary>archived ({{ archived.len() }})</summary>
-      <ul class="chat-list">
-        {% for chat in archived %}
-        <li>
-          <a class="chat-link chat-link--muted{% if chat.active %} chat-link--active{% endif %}"
-             href="/chats/{{ chat.platform_id }}">
-            <span class="chat-name">{{ chat.label }}</span>
-          </a>
-        </li>
-        {% endfor %}
-      </ul>
-    </details>
-    {% endif %}
-    <a class="admin-back" href="/admin/endpoints">⚙ admin</a>
-  </nav>
+  {% include "chat-nav.html" %}
   <main class="chat">
     {% if let Some(current) = current %}
     <header class="chat-header">
       <h1>{{ current.label }}</h1>
       <span class="chat-status" id="chat-status"></span>
+      {% if current.is_coder %}
+      <a class="chat-files" href="/chats/{{ current.platform_id }}/files">files</a>
+      {% endif %}
       {% if current.archived %}
       <button type="button" class="chat-archive" data-chat="{{ current.platform_id }}"
               data-archived="false">unarchive</button>

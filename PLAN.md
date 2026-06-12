@@ -220,11 +220,14 @@ browser is jailed to one agent's folder server-side — the client is never trus
       name; `Entry` is `Serialize`), `read_text` (binary + `FILE_VIEW_MAX_BYTES` guards), `read_bytes`
       (download), `write_text`/`mkdir`/`delete`/`rename` (root-target guarded). Tests: table-driven
       jail (`..`, absolute, `a/../../b`, symlink escape, valid nested) + tempdir ops. (§4, §11)
-- [ ] **11.2 Read-only per-chat browser UI.** `WebState.groups_dir`; `resolve_coder` helper
-      (chat platform_id → messaging group → top wiring → coder `AgentGroup`); `is_coder` on
-      `CurrentChat` + **files** header link; extract a `chat-nav.html` sidebar partial; `GET
-      /chats/{id}/files` page (`files.html`) + `GET /api/chats/{id}/files/{list,read}`; `claw.js`
-      browser (listing + breadcrumb + `<pre>` viewer) + `.fs-*` tokens-only CSS; `screenshots/files.png`.
+- [x] **11.2 Read-only per-chat browser UI.** `WebState.groups_dir`; `files::coder_folder` helper
+      (chat platform_id → messaging group → top wiring → coder `AgentGroup`, `None` otherwise); the
+      chat header shows a **files** link only when `current.is_coder`; extracted a `chat-nav.html`
+      sidebar partial shared by `shell.html` + `files.html`. `GET /chats/{id}/files` page +
+      `GET /api/chats/{id}/files/{list,read}` (jailed via M11.1, non-coder/unknown ⇒ 404, binary/
+      oversize ⇒ 415, traversal ⇒ 400). `claw.js` browser (breadcrumb + dir nav + `<pre>` viewer,
+      names escaped before innerHTML) + `.fs-*` tokens-only CSS (incl. a mobile stack). Unit test
+      for the coder gate; verified end-to-end over HTTP + Playwright. Screenshot: `files.png`. (§11)
 - [ ] **11.3 Mutations.** `write`/`mkdir`/`delete`(confirm)/`rename`/`upload`(axum `multipart`
       feature)/raw download routes; editor + toolbar in `files.html`/`claw.js`; refresh `files.png`.
 

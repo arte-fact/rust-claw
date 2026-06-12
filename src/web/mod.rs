@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod files;
 pub mod pages;
 pub mod render;
 pub mod sse;
@@ -30,6 +31,8 @@ pub struct WebState {
     /// Per-session DBs, for the Tasks page (M7.3b).
     pub store: Arc<SessionStore>,
     pub timezone: String,
+    /// Base of agent workspace folders, for the per-chat file browser (M11.2).
+    pub groups_dir: std::path::PathBuf,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -37,6 +40,12 @@ pub fn build_app(state: WebState) -> Router {
         .route("/", get(pages::home))
         .route("/chats", axum::routing::post(pages::create_chat_form))
         .route("/chats/{platform_id}", get(pages::chat_page))
+        .route("/chats/{platform_id}/files", get(files::page))
+        .route(
+            "/api/chats/{platform_id}/files/list",
+            get(files::list_entries),
+        )
+        .route("/api/chats/{platform_id}/files/read", get(files::read_file))
         .route("/events", get(sse::events))
         .route("/api/chats", get(api::list_chats).post(api::create_chat))
         .route(
@@ -91,6 +100,7 @@ mod tests {
                 "/tmp/claw-test",
             ))),
             timezone: "UTC".to_owned(),
+            groups_dir: std::path::PathBuf::from("/tmp/claw-test/groups"),
             central,
             hub,
         })

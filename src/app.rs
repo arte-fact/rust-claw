@@ -128,6 +128,7 @@ pub async fn build(config: &Config) -> Result<App, AppError> {
         commands,
         store,
         timezone: config.timezone.clone(),
+        groups_dir: config.groups_dir(),
     };
     Ok(App {
         http: build_app(state),

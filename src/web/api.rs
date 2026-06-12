@@ -34,14 +34,28 @@ pub enum ApiError {
     NotAnOption(String),
     #[error("channel error: {0}")]
     Channel(String),
+    #[error(transparent)]
+    Workspace(#[from] crate::workspace::WorkspaceError),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        use crate::workspace::WorkspaceError;
         let status = match &self {
             Self::ChatNotFound | Self::QuestionClosed => StatusCode::NOT_FOUND,
             Self::NoAgentGroup => StatusCode::CONFLICT,
             Self::NotAnOption(_) => StatusCode::BAD_REQUEST,
+            Self::Workspace(err) => match err {
+                WorkspaceError::Escape | WorkspaceError::InvalidName => StatusCode::BAD_REQUEST,
+                WorkspaceError::NotFound
+                | WorkspaceError::NotADirectory
+                | WorkspaceError::NotAFile => StatusCode::NOT_FOUND,
+                WorkspaceError::Binary | WorkspaceError::TooLarge => {
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE
+                }
+                WorkspaceError::Exists => StatusCode::CONFLICT,
+                WorkspaceError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            },
             Self::Db(_) | Self::Session(_) | Self::Join(_) | Self::Channel(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

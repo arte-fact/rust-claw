@@ -63,10 +63,10 @@ struct ShellPage {
     current: Option<CurrentChat>,
 }
 
-struct ChatItem {
-    platform_id: String,
-    label: String,
-    active: bool,
+pub(super) struct ChatItem {
+    pub platform_id: String,
+    pub label: String,
+    pub active: bool,
 }
 
 struct CurrentChat {
@@ -74,6 +74,32 @@ struct CurrentChat {
     label: String,
     messages: Vec<String>,
     archived: bool,
+    is_coder: bool,
+}
+
+/// Builds the sidebar's active and archived web-chat lists, marking `selected` active.
+/// Shared by the chat shell and the file browser (both render `chat-nav.html`).
+pub(super) fn web_chat_items(
+    conn: &rusqlite::Connection,
+    selected: Option<&str>,
+) -> Result<(Vec<ChatItem>, Vec<ChatItem>), rusqlite::Error> {
+    let (mut chats, mut archived) = (Vec::new(), Vec::new());
+    for group in messaging_groups::list(conn)?
+        .into_iter()
+        .filter(|group| group.channel_type == crate::channels::web::CHANNEL_TYPE)
+    {
+        let item = ChatItem {
+            active: selected == Some(group.platform_id.as_str()),
+            label: group.name.unwrap_or_else(|| group.platform_id.clone()),
+            platform_id: group.platform_id,
+        };
+        if group.archived_at.is_some() {
+            archived.push(item);
+        } else {
+            chats.push(item);
+        }
+    }
+    Ok((chats, archived))
 }
 
 pub async fn home(State(state): State<WebState>) -> Result<Response, ApiError> {
@@ -104,22 +130,7 @@ async fn shell(state: WebState, selected: Option<String>) -> Result<Response, Ap
     let central = state.central.clone();
     let page = crate::blocking::run::<_, _, ApiError>(move || {
         central.with(|conn| {
-            let (mut chats, mut archived) = (Vec::new(), Vec::new());
-            for group in messaging_groups::list(conn)?
-                .into_iter()
-                .filter(|group| group.channel_type == crate::channels::web::CHANNEL_TYPE)
-            {
-                let item = ChatItem {
-                    active: selected.as_deref() == Some(group.platform_id.as_str()),
-                    label: group.name.unwrap_or_else(|| group.platform_id.clone()),
-                    platform_id: group.platform_id,
-                };
-                if group.archived_at.is_some() {
-                    archived.push(item);
-                } else {
-                    chats.push(item);
-                }
-            }
+            let (chats, archived) = web_chat_items(conn, selected.as_deref())?;
 
             let current = match &selected {
                 None => None,
@@ -137,6 +148,7 @@ async fn shell(state: WebState, selected: Option<String>) -> Result<Response, Ap
                         .map(message_html)
                         .collect();
                     Some(CurrentChat {
+                        is_coder: super::files::coder_folder(conn, platform_id)?.is_some(),
                         platform_id: group.platform_id,
                         label: group.name.unwrap_or_else(|| "unnamed".to_owned()),
                         messages,
@@ -156,7 +168,7 @@ async fn shell(state: WebState, selected: Option<String>) -> Result<Response, Ap
     Ok(render_page(&page))
 }
 
-fn render_page<T: Template>(page: &T) -> Response {
+pub(super) fn render_page<T: Template>(page: &T) -> Response {
     match page.render() {
         Ok(body) => Html(body).into_response(),
         Err(error) => {

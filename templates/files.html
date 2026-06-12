@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>files · {{ label }}</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  {% include "chat-nav.html" %}
+  <main class="chat fs" id="fs" data-chat="{{ platform_id }}">
+    <header class="chat-header">
+      <h1>{{ label }}</h1>
+      <span class="fs-folder">{{ folder }}</span>
+      <a class="chat-files" href="/chats/{{ platform_id }}">← chat</a>
+    </header>
+    <nav class="fs-breadcrumb" id="fs-breadcrumb"></nav>
+    <section class="fs-panes">
+      <ul class="fs-list" id="fs-list"></ul>
+      <article class="fs-viewer" id="fs-viewer">
+        <p class="fs-hint">select a file to view it</p>
+      </article>
+    </section>
+  </main>
+</div>
+<script src="/assets/claw.js"></script>
+</body>
+</html>
