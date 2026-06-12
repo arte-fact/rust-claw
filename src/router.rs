@@ -23,7 +23,7 @@ pub enum RouteError {
     Join(#[from] tokio::task::JoinError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InboundEvent {
     pub channel_type: String,
     pub platform_id: String,

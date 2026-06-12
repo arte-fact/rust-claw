@@ -1,5 +1,6 @@
 pub mod agent_groups;
 pub mod approvals;
+pub mod channel_cursors;
 pub mod connectors;
 pub mod dropped;
 pub mod endpoints;

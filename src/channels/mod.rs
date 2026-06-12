@@ -1,3 +1,4 @@
+pub mod sms;
 pub mod web;
 
 use std::collections::HashMap;

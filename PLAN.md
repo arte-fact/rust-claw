@@ -402,7 +402,7 @@ text-only). Amends the §1 non-goal (adapters whose transport is a plain HTTP AP
       connector for its `channel_type` (DM always-engage, Shared session — wiring defaults);
       explicit wirings win. Tests: CRUD round-trip, fallback routes + enqueues, disabled
       connector still drops "no-wiring", explicit wiring beats fallback.
-- [ ] **17.2 Cursor store + SMS pure functions.** Migration `008-channel-cursors`
+- [x] **17.2 Cursor store + SMS pure functions.** Migration `008-channel-cursors`
       (`channel_cursors(channel_type TEXT PRIMARY KEY, cursor INTEGER NOT NULL)`) +
       `src/db/channel_cursors.rs` (get/upsert). `src/channels/sms.rs` skeleton: serde types for
       sim-server payloads (`Index`/`Seq: Option<i64>`/`Smstat`/`Phone`/`Content`/`Date` renames)

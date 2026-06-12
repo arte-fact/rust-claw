@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "007-connectors",
         up: connectors,
     },
+    Migration {
+        version: 8,
+        name: "008-channel-cursors",
+        up: channel_cursors,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -273,6 +278,18 @@ fn connectors(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// Inbound poll position per channel (M17): the highest upstream sequence a
+/// channel adapter has routed. Persisted per message so a crash replays at most
+/// one (§10, at-least-once).
+fn channel_cursors(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE channel_cursors (
+           channel_type TEXT PRIMARY KEY,
+           cursor       INTEGER NOT NULL
+         );",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +316,7 @@ mod tests {
                 (5, "005-pending-approvals".to_owned()),
                 (6, "006-archive-chats".to_owned()),
                 (7, "007-connectors".to_owned()),
+                (8, "008-channel-cursors".to_owned()),
             ]
         );
     }
