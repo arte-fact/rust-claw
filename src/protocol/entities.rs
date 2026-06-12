@@ -48,6 +48,49 @@ text_enum!(Role {
     Admin => "admin",
 });
 
+text_enum!(ConnectorKind {
+    Sms => "sms",
+});
+
+/// sim-server credentials (M17). `base_url` without a trailing slash; `token`
+/// needs the `read` + `send` scopes; `webhook_secret` enables the wake-up hook.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SmsConnectorConfig {
+    pub base_url: String,
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
+}
+
+/// Per-kind connector settings: the `kind` column picks the variant, so config
+/// JSON is always parsed against the right shape. Adding a kind extends every
+/// `match` below — the compiler walks you to each integration point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectorConfig {
+    Sms(SmsConnectorConfig),
+}
+
+impl ConnectorConfig {
+    #[must_use]
+    pub fn kind(&self) -> ConnectorKind {
+        match self {
+            Self::Sms(_) => ConnectorKind::Sms,
+        }
+    }
+
+    pub fn parse(kind: ConnectorKind, json: &str) -> Result<Self, serde_json::Error> {
+        match kind {
+            ConnectorKind::Sms => serde_json::from_str(json).map(Self::Sms),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        match self {
+            Self::Sms(config) => serde_json::to_string(config),
+        }
+    }
+}
+
 text_enum!(SessionStatus {
     Active => "active",
     Closed => "closed",
@@ -77,6 +120,28 @@ mod tests {
         for kind in AgentProviderKind::ALL {
             assert_eq!(kind.as_str().parse::<AgentProviderKind>().ok(), Some(*kind));
         }
+    }
+
+    #[test]
+    fn connector_config_round_trips_and_keeps_kind_consistent() {
+        let config = ConnectorConfig::Sms(SmsConnectorConfig {
+            base_url: "http://sim:8080".to_owned(),
+            token: "sms_secret".to_owned(),
+            webhook_secret: None,
+        });
+        assert_eq!(config.kind(), ConnectorKind::Sms);
+        let json = config.to_json().expect("serialize");
+        assert!(
+            !json.contains("webhook_secret"),
+            "an absent secret must not serialize as null"
+        );
+        let back = ConnectorConfig::parse(ConnectorKind::Sms, &json).expect("parse");
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn connector_config_rejects_a_wrong_shape() {
+        assert!(ConnectorConfig::parse(ConnectorKind::Sms, "{\"nope\":1}").is_err());
     }
 
     #[test]

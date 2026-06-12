@@ -393,7 +393,7 @@ stays the single source of truth (sim-server webhooks only cover messages notice
 twice). Outbound = `POST /api/messages {phone, content}` (server splits long texts; no MMS —
 text-only). Amends the §1 non-goal (adapters whose transport is a plain HTTP API live in trunk).
 
-- [ ] **17.1 Connectors resource + routing fallback.** Migration `007-connectors`
+- [x] **17.1 Connectors resource + routing fallback.** Migration `007-connectors`
       (`connectors(id, kind TEXT UNIQUE, label, config JSON, agent_group_id, enabled)`) +
       `src/db/connectors.rs`; `ConnectorKind` enum + per-kind typed config (SMS:
       `{base_url, token, webhook_secret?}`) in `protocol/entities.rs`; `connectors-*` CRUD in

@@ -1,5 +1,6 @@
 pub mod agent_groups;
 pub mod approvals;
+pub mod connectors;
 pub mod dropped;
 pub mod endpoints;
 pub mod messaging_groups;

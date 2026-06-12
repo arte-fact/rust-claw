@@ -17,6 +17,7 @@ pub fn all() -> Vec<CommandDef> {
     let mut commands = endpoint_commands();
     commands.extend(group_commands());
     commands.extend(wiring_commands());
+    commands.extend(super::connectors::commands());
     commands.extend(role_commands());
     commands
 }

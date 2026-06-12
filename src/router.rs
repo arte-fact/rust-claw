@@ -4,10 +4,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::blocking;
-use crate::db::{CentralDb, DbError, dropped, messaging_groups, sessions};
+use crate::db::{CentralDb, DbError, connectors, dropped, messaging_groups, sessions};
 use crate::engage::{Engage, EngageInput, evaluate};
 use crate::protocol::content::{InboundContent, Routing};
-use crate::protocol::entities::{EngageMode, SessionMode};
+use crate::protocol::entities::{ConnectorKind, EngageMode, SessionMode};
 use crate::protocol::ids::SessionId;
 use crate::protocol::message::MessageKind;
 use crate::runs::queue::RunQueue;
@@ -125,6 +125,9 @@ impl Router {
                         )?,
                     };
                 let wirings = messaging_groups::wirings_for(conn, &group.id)?;
+                if wirings.is_empty() {
+                    return connector_fallback_targets(conn, &channel_type, &group.id);
+                }
                 Ok(wirings
                     .into_iter()
                     .map(|wiring| RouteTarget {
@@ -200,6 +203,32 @@ impl Router {
         })
         .await
     }
+}
+
+/// A channel with no explicit wirings falls back to its connector's assigned
+/// agent (M17): the connector row IS the assignment, so reassigning it moves
+/// every conversation on that channel at once. Wiring defaults apply (Shared
+/// session, Mention engage — moot for DMs, which always run). Channels that are
+/// not connector kinds ("web", "agent") never reach a connector row.
+fn connector_fallback_targets(
+    conn: &rusqlite::Connection,
+    channel_type: &str,
+    messaging_group_id: &crate::protocol::ids::MessagingGroupId,
+) -> Result<Vec<RouteTarget>, rusqlite::Error> {
+    let Ok(kind) = channel_type.parse::<ConnectorKind>() else {
+        return Ok(Vec::new());
+    };
+    Ok(connectors::get_enabled_by_kind(conn, kind)?
+        .map(|connector| {
+            vec![RouteTarget {
+                agent_group_id: connector.agent_group_id,
+                session_mode: SessionMode::Shared,
+                engage_mode: EngageMode::Mention,
+                engage_pattern: None,
+                messaging_group_id: messaging_group_id.clone(),
+            }]
+        })
+        .unwrap_or_default())
 }
 
 /// Applies the wiring's engage mode to an inbound message. Sticky mention state
@@ -433,6 +462,121 @@ mod tests {
             panic!("expected deliveries");
         };
         assert_ne!(a, b, "threads must get separate sessions");
+    }
+
+    fn sms_event(platform_id: &str, text: &str) -> InboundEvent {
+        InboundEvent {
+            channel_type: "sms".to_owned(),
+            ..chat_event(platform_id, None, text)
+        }
+    }
+
+    fn create_sms_connector(
+        conn: &rusqlite::Connection,
+        agent_group_id: &AgentGroupId,
+    ) -> Result<crate::db::connectors::Connector, rusqlite::Error> {
+        let config = crate::protocol::entities::ConnectorConfig::Sms(
+            crate::protocol::entities::SmsConnectorConfig {
+                base_url: "http://sim:8080".to_owned(),
+                token: "sms_secret".to_owned(),
+                webhook_secret: None,
+            },
+        );
+        connectors::create(conn, &config, agent_group_id, None)
+    }
+
+    #[tokio::test]
+    async fn an_unwired_sms_number_falls_back_to_the_connectors_agent() {
+        let fix = fixture(false);
+        fix.central
+            .with(|conn| create_sms_connector(conn, &fix.agent_group_id).map(|_| ()))
+            .expect("connector");
+
+        let outcome = fix
+            .router
+            .route(sms_event("+33612345678", "hello"))
+            .await
+            .expect("route");
+        let RouteOutcome::Delivered { sessions } = outcome else {
+            panic!("expected the connector fallback to deliver");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            fix.queue.snapshot(),
+            sessions,
+            "an SMS DM always engages and must enqueue"
+        );
+
+        let db = fix
+            .store
+            .open(&fix.agent_group_id, &sessions[0])
+            .expect("open");
+        let routing = db.routing().expect("routing").expect("must be set");
+        assert_eq!(routing.channel_type.as_deref(), Some("sms"));
+        assert_eq!(routing.platform_id.as_deref(), Some("+33612345678"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_connector_still_drops_unwired_messages() {
+        let fix = fixture(false);
+        fix.central
+            .with(|conn| {
+                let mut connector = create_sms_connector(conn, &fix.agent_group_id)?;
+                connector.enabled = false;
+                connectors::update(conn, &connector)?;
+                Ok(())
+            })
+            .expect("connector");
+
+        let outcome = fix
+            .router
+            .route(sms_event("+33612345678", "hello"))
+            .await
+            .expect("route");
+        assert_eq!(
+            outcome,
+            RouteOutcome::Dropped {
+                reason: "no-wiring"
+            }
+        );
+        assert!(fix.queue.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_wiring_beats_the_connector_fallback() {
+        let fix = fixture(false);
+        let pinned_group = fix
+            .central
+            .with(|conn| {
+                create_sms_connector(conn, &fix.agent_group_id)?;
+                // The number is explicitly wired to a different agent.
+                let pinned = agent_groups::create(conn, "Coder", "coder")?;
+                let mg = messaging_groups::create(conn, "sms", "+33612345678", None, false)?;
+                messaging_groups::wire(conn, &mg.id, &pinned.id)?;
+                Ok(pinned.id)
+            })
+            .expect("seed");
+
+        let RouteOutcome::Delivered { sessions } = fix
+            .router
+            .route(sms_event("+33612345678", "hello"))
+            .await
+            .expect("route")
+        else {
+            panic!("expected delivery");
+        };
+        assert_eq!(sessions.len(), 1, "the wiring wins; no fallback fan-out");
+        let owner: AgentGroupId = fix
+            .central
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT agent_group_id FROM sessions WHERE id = ?1",
+                    [&sessions[0]],
+                    |row| row.get(0),
+                )
+            })
+            .expect("session owner");
+        assert_eq!(owner, pinned_group);
     }
 
     #[tokio::test]

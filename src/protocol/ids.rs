@@ -1,6 +1,7 @@
 use super::macros::string_id;
 
 string_id!(AgentGroupId);
+string_id!(ConnectorId);
 string_id!(MessagingGroupId);
 string_id!(SessionId);
 string_id!(UserId);

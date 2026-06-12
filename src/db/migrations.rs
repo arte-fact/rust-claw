@@ -39,6 +39,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "006-archive-chats",
         up: archive_chats,
     },
+    Migration {
+        version: 7,
+        name: "007-connectors",
+        up: connectors,
+    },
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
@@ -251,6 +256,23 @@ fn archive_chats(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("ALTER TABLE messaging_groups ADD COLUMN archived_at TEXT;")
 }
 
+/// External channel instances (M17): one row = one channel = one assigned agent
+/// group. `kind` doubles as the channel_type and stays UNIQUE until a
+/// multi-instance channel exists; `config` is kind-shaped JSON (§10).
+fn connectors(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE connectors (
+           id             TEXT PRIMARY KEY,
+           kind           TEXT NOT NULL UNIQUE,
+           label          TEXT,
+           config         TEXT NOT NULL,
+           agent_group_id TEXT NOT NULL REFERENCES agent_groups(id),
+           enabled        INTEGER NOT NULL DEFAULT 1,
+           created_at     TEXT NOT NULL
+         );",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +298,7 @@ mod tests {
                 (4, "004-question-cards".to_owned()),
                 (5, "005-pending-approvals".to_owned()),
                 (6, "006-archive-chats".to_owned()),
+                (7, "007-connectors".to_owned()),
             ]
         );
     }

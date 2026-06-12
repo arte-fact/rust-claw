@@ -1,3 +1,4 @@
+mod connectors;
 pub mod gates;
 pub mod registry;
 mod resources;
