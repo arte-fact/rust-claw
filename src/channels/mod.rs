@@ -98,22 +98,31 @@ pub trait ChannelAdapter: Send + Sync {
     }
 }
 
+/// What `build_adapters` produced: the registry list plus typed handles for
+/// the surfaces that need a concrete adapter (the SMS webhook wake-up, §10).
+#[derive(Default)]
+pub struct BuiltAdapters {
+    pub adapters: Vec<Arc<dyn ChannelAdapter>>,
+    pub sms: Option<Arc<sms::SmsChannel>>,
+}
+
 /// One adapter per enabled connector row (§10). Exhaustive over
 /// `ConnectorConfig`: a new kind does not compile until it is built here.
 pub fn build_adapters(
     central: &Arc<crate::db::CentralDb>,
     connectors: &[crate::db::connectors::Connector],
-) -> Result<Vec<Arc<dyn ChannelAdapter>>, ChannelError> {
-    connectors
-        .iter()
-        .filter(|connector| connector.enabled)
-        .map(|connector| match &connector.config {
+) -> Result<BuiltAdapters, ChannelError> {
+    let mut built = BuiltAdapters::default();
+    for connector in connectors.iter().filter(|connector| connector.enabled) {
+        match &connector.config {
             crate::protocol::entities::ConnectorConfig::Sms(config) => {
-                sms::SmsChannel::new(central.clone(), config)
-                    .map(|channel| Arc::new(channel) as Arc<dyn ChannelAdapter>)
+                let channel = Arc::new(sms::SmsChannel::new(central.clone(), config)?);
+                built.adapters.push(channel.clone());
+                built.sms = Some(channel);
             }
-        })
-        .collect()
+        }
+    }
+    Ok(built)
 }
 
 #[derive(Default)]
@@ -168,7 +177,10 @@ mod tests {
             .expect("rows");
 
         let disabled = build_adapters(&central, &rows).expect("build");
-        assert!(disabled.is_empty(), "disabled rows must not build adapters");
+        assert!(
+            disabled.adapters.is_empty() && disabled.sms.is_none(),
+            "disabled rows must not build adapters"
+        );
 
         let central2 = central.clone();
         central2
@@ -180,8 +192,9 @@ mod tests {
             .expect("enable");
         let rows = central.with(connectors::list).expect("rows");
         let enabled = build_adapters(&central, &rows).expect("build");
-        assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].channel_type(), "sms");
-        assert!(!enabled[0].supports_threads());
+        assert_eq!(enabled.adapters.len(), 1);
+        assert_eq!(enabled.adapters[0].channel_type(), "sms");
+        assert!(!enabled.adapters[0].supports_threads());
+        assert!(enabled.sms.is_some(), "the typed SMS handle is exposed");
     }
 }

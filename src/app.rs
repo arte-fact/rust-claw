@@ -5,7 +5,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::channels::web::WebChannel;
-use crate::channels::{AdapterRegistry, ChannelAdapter, ChannelError, build_adapters};
+use crate::channels::{
+    AdapterRegistry, BuiltAdapters, ChannelAdapter, ChannelError, build_adapters,
+};
 use crate::config::Config;
 use crate::db::{CentralDb, DbError, agent_groups};
 use crate::delivery::Delivery;
@@ -76,8 +78,9 @@ pub async fn build_with_logs(
     let queue = Arc::new(RunQueue::new());
     let hub = Hub::new();
     let web_channel = Arc::new(WebChannel::new(central.clone(), hub.clone()));
+    let built = connector_adapters(&central).await?;
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = vec![web_channel.clone()];
-    adapters.extend(connector_adapters(&central).await?);
+    adapters.extend(built.adapters);
     let registry = Arc::new(AdapterRegistry::new(adapters));
 
     let cancel = CancellationToken::new();
@@ -165,6 +168,7 @@ pub async fn build_with_logs(
         logs,
         activity,
         queue,
+        sms: built.sms,
     };
     Ok(App {
         http: build_app(state),
@@ -232,9 +236,7 @@ async fn connect_web_mcp() -> Option<Arc<crate::mcp::McpClient>> {
 }
 
 /// Adapters for the enabled connector rows (M17) — restart applies changes.
-async fn connector_adapters(
-    central: &Arc<CentralDb>,
-) -> Result<Vec<Arc<dyn ChannelAdapter>>, AppError> {
+async fn connector_adapters(central: &Arc<CentralDb>) -> Result<BuiltAdapters, AppError> {
     let rows = {
         let central = central.clone();
         blocking(move || central.with(crate::db::connectors::list)).await?

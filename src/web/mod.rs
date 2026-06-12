@@ -3,6 +3,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod files;
+pub mod hooks;
 pub mod logs;
 pub mod notify;
 pub mod pages;
@@ -46,6 +47,8 @@ pub struct WebState {
     pub activity: Arc<crate::activity::ActivityHub>,
     /// The run queue, to show which sessions are waiting (M16).
     pub queue: Arc<crate::runs::queue::RunQueue>,
+    /// The SMS connector, when one is configured — the webhook wake-up target (M17.4).
+    pub sms: Option<Arc<crate::channels::sms::SmsChannel>>,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -106,6 +109,8 @@ pub fn build_app(state: WebState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/assets/{*path}", get(pages::asset))
+        // Outside the login gate: the HMAC signature is the authentication (§11).
+        .route("/api/hooks/sms", post(hooks::sms))
         .merge(auth::routes())
         .merge(protected)
         .with_state(state)
@@ -133,6 +138,7 @@ mod tests {
             logs: crate::logs::LogBuffer::new(crate::logs::DEFAULT_CAPACITY),
             activity: crate::activity::ActivityHub::new(),
             queue: Arc::new(crate::runs::queue::RunQueue::new()),
+            sms: None,
             central,
             hub,
         })

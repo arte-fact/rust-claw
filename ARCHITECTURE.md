@@ -151,8 +151,9 @@ rust-claw/
     channels/
       mod.rs              #   ChannelAdapter trait + build_adapters() barrel
       web.rs              #   the built-in adapter (bridges axum ⇄ router/delivery)
-      sms.rs              #   sim-server SMS connector (M17): after_seq cursor poll +
-                          #   HMAC webhook wake-up ping; POST send. Text-only, no MMS.
+      sms/                #   sim-server SMS connector (M17): protocol.rs (payload types,
+                          #   pure cursor/render fns) + the adapter (after_seq cursor poll,
+                          #   HMAC webhook wake-up ping, POST send). Text-only, no MMS.
     web/                  # axum: routes, SSE hub, auth middleware, embedded static UI
     commands/             # admin command registry + per-resource defs (CRUD); args carry
                           # display metadata (label, type, options) so the web admin renders
@@ -662,8 +663,15 @@ These port from the first draft with containers subtracted:
   win. Adapters are built from enabled rows at startup (a change needs a restart until the
   optional reconciler lands). SMS inbound is **at-least-once**: the `after_seq` cursor
   (`channel_cursors`) is persisted per message after the inbound send, so a crash can replay at
-  most one message; the webhook is a wake-up ping only — verified, then it just triggers an
-  immediate poll, never carrying message data.
+  most one message; on the very first run the adapter takes sim-server's high-water mark without
+  routing, so retained history never floods the agent. The webhook is a wake-up ping only:
+  `POST /api/hooks/sms` (outside the login gate) verifies `X-Sms-Signature` = HMAC-SHA256 over
+  the raw body with the connector's `webhook_secret` and just nudges the poller — 204 on valid,
+  401 on a bad/missing signature, 404 when no SMS connector or secret is configured. The cursor
+  stays the single source of truth, so a lost, duplicated, or rejected hook changes nothing;
+  without a registered webhook the poll loop alone delivers within ~2 s. Questions ride over SMS
+  as plain text (the answer comes back as a normal inbound; the open `questions` row expires via
+  the sweep TTL); approvals are web-only and render as a pointer to the admin.
 - **Delivery** (`delivery.rs`): poll `messages_out` (1s while a run is live for that session, 60s
   sweep over all active sessions), filter against `delivered`, dispatch: `system` → action registry;
   `channel_type='agent'` (delegation, `platform_id`=target group) → write into a per-source worker
@@ -701,6 +709,13 @@ NanoClaw's premise is OS-level isolation per agent. rust-claw trades that away d
 - Mitigations kept cheap and real: containment-checked attachment staging, destination allowlists
   validated host-side, the approval flow for self-modifying actions, and single-user auth on the
   only network surface.
+- The SMS connector (M17) widens who can reach an agent: once assigned, **anyone who knows the
+  SIM's number** talks to that agent, and an SMS sender id is spoofable — treat SMS as an
+  untrusted input channel, never an authorization one (approvals stay web-only). The claw ↔
+  sim-server link is assumed to be a trusted LAN/localhost hop (the bearer token travels in
+  headers; put TLS in front if it ever crosses a network). The webhook route is the one
+  unauthenticated POST surface; its HMAC check is the authentication, and a forged-but-valid
+  replay can only cause a harmless extra poll.
 
 If per-agent isolation is ever wanted back, the seams are preserved: the provider spawn is one
 function, and the single-session DB schema works across a mount boundary too (it would need the
@@ -744,6 +759,12 @@ upstream pragma discipline back — see the dropped-invariants table in §5 for 
 | `askama` | server-side templates (pages + SSE fragments, one rendering path) |
 | `pulldown-cmark` (+ sanitizer) | server-side markdown for agent messages |
 | `rust-embed` (or `include_dir`) | UI assets (css, js, Fira Code woff2) in the binary |
+| `hmac` + `sha2` | webhook wake-up signature check (M17.4) — RustCrypto, pure Rust, no_std-grade |
+
+The SMS connector polls rather than streaming: sim-server's SSE would need reqwest's `stream`
+feature plus a hand-rolled event parser, and its webhooks alone miss messages (live-only, two
+retries) — `after_seq` cursor polling is restart-safe by construction and the HMAC wake-up ping
+already brings latency to near-instant, so SSE buys nothing here.
 
 No new crate for MCP (M12): the stdio client (`src/mcp/`) is hand-rolled on `tokio` + `serde_json`,
 so `rmcp` stays out of the tree. The bundled web-search MCP server is a **separate Rust binary**

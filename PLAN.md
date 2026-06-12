@@ -422,7 +422,7 @@ text-only). Amends the §1 non-goal (adapters whose transport is a plain HTTP AP
       builds adapters from enabled connector rows (restart applies changes). Tests: in-process
       axum mock of both endpoints — first-run skip, poll → `InboundEvent` fields, cursor survives
       a simulated restart, send body + bearer header, 500 → `Delivery` error.
-- [ ] **17.4 Webhook wake-up + docs.** `POST /api/hooks/sms` outside the login gate: verify
+- [x] **17.4 Webhook wake-up + docs.** `POST /api/hooks/sms` outside the login gate: verify
       `X-Sms-Signature` = HMAC-SHA256(body, connector `webhook_secret`) constant-time; fire the
       shared `Notify` → immediate poll. 204 valid / 401 bad-or-missing signature / 404 when no
       SMS connector or secret is configured. New deps `hmac` + `sha2` (RustCrypto, pure Rust),

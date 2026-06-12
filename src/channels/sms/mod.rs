@@ -27,6 +27,7 @@ pub struct SmsChannel {
     central: Arc<CentralDb>,
     base_url: String,
     token: String,
+    webhook_secret: Option<String>,
     wake: Notify,
     http: reqwest::Client,
     poll_interval: Duration,
@@ -60,10 +61,16 @@ impl SmsChannel {
             central,
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             token: config.token.clone(),
+            webhook_secret: config.webhook_secret.clone(),
             wake: Notify::new(),
             http,
             poll_interval: POLL_INTERVAL,
         })
+    }
+
+    #[must_use]
+    pub fn webhook_secret(&self) -> Option<&str> {
+        self.webhook_secret.as_deref()
     }
 
     #[must_use]
