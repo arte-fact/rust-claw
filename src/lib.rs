@@ -20,3 +20,4 @@ pub mod runs;
 pub mod session;
 pub mod sweep;
 pub mod web;
+pub mod workspace;

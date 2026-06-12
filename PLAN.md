@@ -205,6 +205,29 @@ folder — see CLAUDE.md §"UI verification".**
       (wirings) render read-only cells. Shared `admin-nav.html` / `admin-field.html` partials. All
       eight `screenshots/` refreshed; existing admin tests still pass (same command values/selects).
 
+## M11 — Browse an agent's workspace from the web UI
+
+Per-chat filesystem browser on **coder** agents (the chat header gets a **files** link only when
+its wired agent is `ToolProfile::Coder`); full read/write. The owner is never gated, but the
+browser is jailed to one agent's folder server-side — the client is never trusted.
+
+- [x] **11.1 Jailed workspace service** (`src/workspace/`). New web-agnostic module: `path.rs`
+      `jail(root, rel)` — lexical `.`/`..` collapse that refuses to climb above root, then a real-path
+      check that canonicalizes the deepest existing ancestor so an in-workspace symlink pointing out
+      is caught (target need not exist, for creates). Deliberately **not** `providers::native::files`,
+      which lets absolute paths + `..` through by design. `mod.rs` `Workspace` (canonical root) +
+      `WorkspaceError` (thiserror). `ops.rs`: `list` (kinds via `symlink_metadata`, dirs-first then
+      name; `Entry` is `Serialize`), `read_text` (binary + `FILE_VIEW_MAX_BYTES` guards), `read_bytes`
+      (download), `write_text`/`mkdir`/`delete`/`rename` (root-target guarded). Tests: table-driven
+      jail (`..`, absolute, `a/../../b`, symlink escape, valid nested) + tempdir ops. (§4, §11)
+- [ ] **11.2 Read-only per-chat browser UI.** `WebState.groups_dir`; `resolve_coder` helper
+      (chat platform_id → messaging group → top wiring → coder `AgentGroup`); `is_coder` on
+      `CurrentChat` + **files** header link; extract a `chat-nav.html` sidebar partial; `GET
+      /chats/{id}/files` page (`files.html`) + `GET /api/chats/{id}/files/{list,read}`; `claw.js`
+      browser (listing + breadcrumb + `<pre>` viewer) + `.fs-*` tokens-only CSS; `screenshots/files.png`.
+- [ ] **11.3 Mutations.** `write`/`mkdir`/`delete`(confirm)/`rename`/`upload`(axum `multipart`
+      feature)/raw download routes; editor + toolbar in `files.html`/`claw.js`; refresh `files.png`.
+
 Backlog (unscheduled, from decision 001): MCP client in the native loop (per-group MCP servers as
 the tool-extensibility seam, `rmcp`); claw-as-MCP-server as an additional control surface for
 external agents; cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

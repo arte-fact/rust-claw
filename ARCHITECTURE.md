@@ -143,6 +143,9 @@ rust-claw/
     commands/             # admin command registry + per-resource defs (CRUD); args carry
                           # display metadata (label, type, options) so the web admin renders
                           # itself from the registry (§9.2)
+    workspace/            # jailed agent-folder filesystem service for the web file
+                          # browser: path.rs (canonicalizing jail — no escape, unlike
+                          # providers::native::files) + ops.rs (list/read/write/…) (§11)
     cli_server.rs         # unix-socket frame server
     cli_client.rs         # socket client used by the CLI subcommands
     modules/              # optional hooks: permissions, approvals, agent-to-agent
