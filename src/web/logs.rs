@@ -16,6 +16,7 @@ struct LogsPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
     logs_active: bool,
+    activity_active: bool,
     lines: Vec<LogRecord>,
 }
 
@@ -26,6 +27,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
         resources: resource_nav(&state, None),
         tasks_active: false,
         logs_active: true,
+        activity_active: false,
         lines: state.logs.snapshot(),
     })
 }

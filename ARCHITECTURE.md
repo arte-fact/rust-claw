@@ -140,6 +140,9 @@ rust-claw/
     logs.rs               # in-memory ring buffer + tracing Layer (M13): the last ~1000
                           # records, broadcast to the /admin/logs live viewer; claw.log
                           # keeps the durable history
+    activity.rs           # in-memory per-agent run state + event feed + broadcast (M16):
+                          # the supervisor reports start/phase/finish/fail; the
+                          # /admin/activity board + sidebar presence read it live
     delivery.rs           # messages_out polling, system actions, channel dispatch
     sweep.rs              # 60s: due schedules → enqueue, recurrence advance, watchdog
     channels/

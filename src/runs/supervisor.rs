@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::{CallerContext, Dispatcher};
-use crate::db::{CentralDb, DbError, agent_groups, sessions};
+use crate::db::{CentralDb, DbError, agent_groups, messaging_groups, sessions};
 use crate::protocol::content::{InboundContent, OutboundContent, Routing};
 use crate::protocol::entities::{AgentProviderKind, CliScope};
 use crate::protocol::ids::{MessagingGroupId, SessionId};
@@ -65,6 +65,7 @@ pub struct Supervisor {
     batch_limit: i64,
     mcp: Option<Arc<crate::mcp::McpClient>>,
     notifier: Option<Arc<dyn RunNotifier>>,
+    activity: Option<Arc<crate::activity::ActivityHub>>,
 }
 
 impl Supervisor {
@@ -105,6 +106,7 @@ impl Supervisor {
             batch_limit: 10,
             mcp: None,
             notifier: None,
+            activity: None,
         }
     }
 
@@ -120,6 +122,13 @@ impl Supervisor {
     #[must_use]
     pub fn with_notifier(mut self, notifier: Option<Arc<dyn RunNotifier>>) -> Self {
         self.notifier = notifier;
+        self
+    }
+
+    /// Attaches the activity hub feeding the admin "mission control" board (M16).
+    #[must_use]
+    pub fn with_activity(mut self, activity: Option<Arc<crate::activity::ActivityHub>>) -> Self {
+        self.activity = activity;
         self
     }
 
@@ -147,6 +156,51 @@ impl Supervisor {
         tokio::task::spawn_blocking(move || notifier.run_failed(&group, &detail));
     }
 
+    /// Builds the activity-board context for a run (M16): chat label, who delegated
+    /// it, and a snippet of the work. Best-effort — purely presentational.
+    async fn run_context(
+        &self,
+        session: &sessions::Session,
+        group: &agent_groups::AgentGroup,
+        batch: &[InboundMessage],
+    ) -> crate::activity::RunContext {
+        let central = self.central.clone();
+        let messaging_group_id = session.messaging_group_id.clone();
+        let source_session = batch
+            .first()
+            .and_then(|message| message.source_session_id.clone());
+        let (chat, delegated_by) = blocking(move || {
+            central.with(|conn| {
+                let chat = match &messaging_group_id {
+                    Some(mg) => messaging_groups::get(conn, mg)?
+                        .map(|group| group.name.unwrap_or(group.platform_id)),
+                    None => None,
+                };
+                let delegated_by = match &source_session {
+                    Some(raw) => match sessions::get(conn, &SessionId::new(raw.clone()))? {
+                        Some(origin) => {
+                            agent_groups::get(conn, &origin.agent_group_id)?.map(|group| group.name)
+                        }
+                        None => None,
+                    },
+                    None => None,
+                };
+                Ok((chat, delegated_by))
+            })
+        })
+        .await
+        .unwrap_or((None, None));
+
+        let prompt = draft_prompt(batch);
+        crate::activity::RunContext {
+            agent_group_id: group.id.clone(),
+            agent: group.name.clone(),
+            chat,
+            delegated_by,
+            message: (!prompt.is_empty()).then(|| prompt.chars().take(140).collect()),
+        }
+    }
+
     /// The single run consumer: pops sessions one at a time, forever.
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         loop {
@@ -166,6 +220,7 @@ impl Supervisor {
     pub async fn run_session(&self, session_id: &SessionId) -> Result<(), RunError> {
         let (session, group) = self.load_session(session_id).await?;
         let messaging_group_id = session.messaging_group_id.clone();
+        let (agent_id, agent_name) = (group.id.clone(), group.name.clone());
         let result = self.run_drain(session, group, &messaging_group_id).await;
         // A run that fails *before* the turn loop (e.g. no endpoint configured)
         // surfaces here; turn failures already reported inside the drain return Ok.
@@ -173,6 +228,12 @@ impl Supervisor {
             self.notify_failed(&messaging_group_id, &error.to_string());
         }
         self.notify_state(&messaging_group_id, false, None);
+        if let Some(activity) = &self.activity {
+            match &result {
+                Ok(()) => activity.finished(&agent_id, &agent_name),
+                Err(error) => activity.failed(&agent_id, &agent_name, &error.to_string()),
+            }
+        }
         result
     }
 
@@ -220,6 +281,10 @@ impl Supervisor {
             }
 
             self.notify_state(messaging_group_id, true, Some("thinking…"));
+            if let Some(activity) = &self.activity {
+                let ctx = self.run_context(&session, &group, &batch).await;
+                activity.started(&ctx);
+            }
             let run = provider.start(QueryInput {
                 prompt: draft_prompt(&batch),
                 cwd: workspace.clone(),
@@ -234,6 +299,9 @@ impl Supervisor {
 
             let outcome = consume_run(run, |detail| {
                 self.notify_state(messaging_group_id, true, Some(detail));
+                if let Some(activity) = &self.activity {
+                    activity.phase(&group.id, &group.name, detail);
+                }
             })
             .await;
             match outcome {
@@ -257,6 +325,9 @@ impl Supervisor {
                 Err(message) => {
                     tracing::warn!(session = %session.id, error = %message, "agent turn failed");
                     self.notify_failed(messaging_group_id, &message);
+                    if let Some(activity) = &self.activity {
+                        activity.failed(&group.id, &group.name, &message);
+                    }
                     let db = db.clone();
                     let batch = batch.clone();
                     blocking(move || apply_retry_backoff(&db, &batch)).await?;

@@ -19,6 +19,7 @@ struct TasksPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
     logs_active: bool,
+    activity_active: bool,
     tasks: Vec<TaskRow>,
 }
 
@@ -40,6 +41,7 @@ pub async fn page(State(state): State<WebState>) -> Result<Response, ApiError> {
         resources,
         tasks_active: true,
         logs_active: false,
+        activity_active: false,
         tasks,
     }))
 }

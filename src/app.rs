@@ -101,6 +101,7 @@ pub async fn build_with_logs(
         central.clone(),
         hub.clone(),
     ));
+    let activity = crate::activity::ActivityHub::new();
     let supervisor = Arc::new(
         Supervisor::new(
             central.clone(),
@@ -114,7 +115,8 @@ pub async fn build_with_logs(
             },
         )
         .with_mcp(connect_web_mcp().await)
-        .with_notifier(Some(notifier)),
+        .with_notifier(Some(notifier))
+        .with_activity(Some(activity.clone())),
     );
     tasks.spawn(supervisor.run(cancel.clone()));
 
@@ -157,6 +159,8 @@ pub async fn build_with_logs(
         timezone: config.timezone.clone(),
         groups_dir: config.groups_dir(),
         logs,
+        activity,
+        queue,
     };
     Ok(App {
         http: build_app(state),

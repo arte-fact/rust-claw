@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw — activity</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/claw.css">
+</head>
+<body>
+<div class="app">
+  {% include "admin-nav.html" %}
+  <main class="chat admin activity" id="activity">
+    <header class="chat-header"><h1>activity</h1></header>
+    <section class="admin-body act-body">
+      <div class="act-board" id="act-board">
+        {% for row in board %}
+        <div class="act-row act-{{ row.status }}" data-agent="{{ row.agent_id }}">
+          <div class="act-line">
+            <span class="act-name">{{ row.agent }}</span>
+            <span class="act-status">{{ row.status }}</span>
+            {% if let Some(chat) = row.chat %}<span class="act-chat">{{ chat }}</span>{% endif %}
+            {% if let Some(by) = row.delegated_by %}<span class="act-by">← {{ by }}</span>{% endif %}
+            {% if let Some(started) = row.started_at %}<span class="act-elapsed" data-start="{{ started }}"></span>{% endif %}
+          </div>
+          {% if let Some(phase) = row.phase %}<div class="act-phase">{{ phase }}</div>{% endif %}
+          {% if let Some(message) = row.message %}<div class="act-msg">{{ message }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="act-feed" id="act-feed">
+        {% for event in feed %}
+        <div class="act-event">
+          <span class="act-event-agent">{{ event.agent }}</span>
+          <span class="act-event-text">{{ event.text }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/assets/claw.js"></script>
+</body>
+</html>

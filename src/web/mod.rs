@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod admin;
 pub mod api;
 pub mod auth;
@@ -41,6 +42,10 @@ pub struct WebState {
     pub groups_dir: std::path::PathBuf,
     /// In-memory recent-log ring for the admin log viewer (M13).
     pub logs: Arc<crate::logs::LogBuffer>,
+    /// Live per-agent activity for the admin "mission control" board (M16).
+    pub activity: Arc<crate::activity::ActivityHub>,
+    /// The run queue, to show which sessions are waiting (M16).
+    pub queue: Arc<crate::runs::queue::RunQueue>,
 }
 
 pub fn build_app(state: WebState) -> Router {
@@ -89,6 +94,8 @@ pub fn build_app(state: WebState) -> Router {
         .route("/admin/tasks/action", axum::routing::post(tasks::action))
         .route("/admin/logs", get(logs::page))
         .route("/admin/logs/stream", get(logs::stream))
+        .route("/admin/activity", get(activity::page))
+        .route("/admin/activity/stream", get(activity::stream))
         .route("/admin/run", axum::routing::post(admin::run))
         .route("/admin/{resource}", get(admin::resource_page))
         .route_layer(middleware::from_fn_with_state(
@@ -124,6 +131,8 @@ mod tests {
             timezone: "UTC".to_owned(),
             groups_dir: std::path::PathBuf::from("/tmp/claw-test/groups"),
             logs: crate::logs::LogBuffer::new(crate::logs::DEFAULT_CAPACITY),
+            activity: crate::activity::ActivityHub::new(),
+            queue: Arc::new(crate::runs::queue::RunQueue::new()),
             central,
             hub,
         })

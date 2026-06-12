@@ -351,6 +351,34 @@ the **concierge-relay** round-trip so a worker's result reaches the user.
       `source_session_id` is now populated. Tests: forward (namespacing + return routing), return
       (lands in the user session, preserves its routing), full round-trip. ARCHITECTURE §10 updated.
 
+## M16 — Agent activity monitor ("mission control")
+
+A real-time view of what every agent is doing: a **board** (per-agent status), a **feed** (timeline),
+and **sidebar presence** (busy dots), with phase + tool + the message being worked on, covering
+active + queued + idle agents. Single-flight today (one run at a time + a queue); the design scales
+to parallel runs for free. Reuses the M13 hub+SSE pattern and the M14 run-lifecycle hooks.
+
+- [x] **16.1 Activity hub + supervisor reporting** (`src/activity.rs`, mirrors `logs.rs`). `ActivityHub`
+      = `Mutex<HashMap<AgentGroupId, AgentActivity>>` + bounded `feed` ring + `broadcast::Sender`.
+      `started/phase/finished/failed` update the map (finished is Running→Idle only, so a turn failure
+      stays visible), push a feed event, broadcast; `snapshot()` + `subscribe()`. Supervisor gets
+      `activity: Option<Arc<ActivityHub>>` + `with_activity`; `run_drain` builds a `RunContext` (agent,
+      chat from `messaging_group_id`, message via `draft_prompt`, delegated-by via
+      `batch[0].source_session_id`) and calls the hub at the M14 lifecycle points (start / `on_progress`
+      phase / finish / `Err`). In-memory, `Option` so runs are unaffected. `app.rs` wires it +
+      `WebState.{activity,queue}`. Tests: the state machine (lifecycle, cold failure, subscribe, cap).
+- [x] **16.2 Admin activity board + feed + SSE.** `src/web/activity.rs`: `page` merges the hub snapshot
+      with all agents (`agent_groups::list` → idle) and the queue (`RunQueue::snapshot()` → resolve to
+      agents → "queued"); `stream` mirrors `logs::stream`. Routes `/admin/activity` + `/stream`;
+      **activity** nav entry (+ `activity_active` on admin/tasks/logs structs). `templates/activity.html`
+      board (status badge, chat + delegated-by, live phase, client-ticked elapsed, message snippet) over
+      a feed; `claw.js` controller (card update-in-place + feed prepend + elapsed tick); `.act-*`
+      tokens-only CSS (incl. mobile stack). Verified live over `/admin/activity/stream` (Andy
+      running→idle, Coder failed); `screenshots/activity.png`. ARCHITECTURE §4 entry.
+- [x] **16.3 Sidebar presence.** Extended `claw.js` `onRun`: a `working` event for any chat lights a
+      pulsing dot on its sidebar `.chat-link`; `idle` clears it. `.chat-link--busy` CSS (pulse). Reuses
+      M14's per-chat `run` SSE — no backend change.
+
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);
 cross-turn tool-round persistence if 4.7's mitigation proves insufficient.

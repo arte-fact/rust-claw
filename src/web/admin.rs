@@ -43,6 +43,7 @@ struct AdminPage {
     resources: Vec<NavItem>,
     tasks_active: bool,
     logs_active: bool,
+    activity_active: bool,
     current: String,
     error: Option<String>,
     /// Existing items as inline-editable (or read-only) rows.
@@ -140,6 +141,7 @@ pub async fn resource_page(
         resources: resource_nav(&state, Some(current)),
         tasks_active: false,
         logs_active: false,
+        activity_active: false,
         current: current.to_owned(),
         error: flash.error,
         rows,

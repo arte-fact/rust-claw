@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod app;
 mod blocking;
 pub mod channels;

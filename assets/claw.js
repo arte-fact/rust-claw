@@ -62,6 +62,9 @@
 
   const onRun = (event) => {
     const { chat, state, detail } = JSON.parse(event.data);
+    // Sidebar presence: light a pulsing dot on any busy chat, not just this one.
+    const link = document.querySelector(`.chat-link[data-chat="${chat}"]`);
+    if (link) link.classList.toggle('chat-link--busy', state !== 'idle');
     if (chat !== currentChat) return;
     if (state === 'idle') {
       if (status) {
@@ -416,6 +419,66 @@
     applyFilters();
     logView.scrollTop = logView.scrollHeight;
     connectLogs();
+  }
+
+  // Activity board (admin → activity): a live card per agent + a feed, driven by
+  // the /admin/activity/stream SSE. Cards update in place; elapsed timers tick.
+  const actBoard = document.getElementById('act-board');
+  if (actBoard) {
+    const actFeed = document.getElementById('act-feed');
+    const escapeHtml = (text) =>
+      text.replace(/[&<>"']/g, (ch) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
+    const elapsed = (start) => {
+      const secs = Math.max(0, Math.floor((Date.now() - new Date(start).getTime()) / 1000));
+      return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    };
+    const tick = () => {
+      for (const el of actBoard.querySelectorAll('.act-elapsed[data-start]')) {
+        el.textContent = elapsed(el.dataset.start);
+      }
+    };
+
+    const cardInner = (a) => {
+      let line =
+        `<div class="act-line"><span class="act-name">${escapeHtml(a.agent)}</span>` +
+        `<span class="act-status">${a.status}</span>`;
+      if (a.chat) line += `<span class="act-chat">${escapeHtml(a.chat)}</span>`;
+      if (a.delegated_by) line += `<span class="act-by">← ${escapeHtml(a.delegated_by)}</span>`;
+      if (a.started_at) line += `<span class="act-elapsed" data-start="${a.started_at}"></span>`;
+      line += '</div>';
+      if (a.phase) line += `<div class="act-phase">${escapeHtml(a.phase)}</div>`;
+      if (a.message) line += `<div class="act-msg">${escapeHtml(a.message)}</div>`;
+      return line;
+    };
+
+    const onActivity = (event) => {
+      const update = JSON.parse(event.data);
+      const row = actBoard.querySelector(`.act-row[data-agent="${update.agent_id}"]`);
+      if (row) {
+        row.className = `act-row act-${update.activity.status}`;
+        row.innerHTML = cardInner(update.activity);
+      }
+      const line = document.createElement('div');
+      line.className = 'act-event';
+      line.innerHTML =
+        `<span class="act-event-agent">${escapeHtml(update.event.agent)}</span>` +
+        `<span class="act-event-text">${escapeHtml(update.event.text)}</span>`;
+      actFeed.insertBefore(line, actFeed.firstChild);
+      while (actFeed.childElementCount > 200) actFeed.removeChild(actFeed.lastElementChild);
+      tick();
+    };
+
+    const connectActivity = () => {
+      const source = new EventSource('/admin/activity/stream');
+      source.addEventListener('activity', onActivity);
+      source.onerror = () => { source.close(); setTimeout(connectActivity, 2000); };
+    };
+
+    tick();
+    setInterval(tick, 1000);
+    connectActivity();
   }
 
   connect();
