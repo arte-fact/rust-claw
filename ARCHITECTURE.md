@@ -41,8 +41,11 @@ Three deliberate departures from upstream, decided up front:
   container. The Docker boundary protects the *host machine*, not sessions from each other (§11).
 - Concurrent agent runs. Sequential is a feature: predictable load, no warm-pool logic, no per-claim
   stuck arbitration.
-- Platform messenger adapters in trunk. The `ChannelAdapter` trait exists and the web channel implements
-  it; Telegram/Discord/etc. are fork work.
+- Heavyweight platform SDKs in trunk. The `ChannelAdapter` trait is the seam; the web channel and
+  the sim-server SMS connector (M17) implement it. Channels whose transport is a plain
+  authenticated HTTP API live in trunk as **connectors** (one row = one channel instance = one
+  assigned agent group, §10); each new one is a code change — a `ConnectorKind` variant + an
+  adapter module. Anything needing a vendor SDK or a second runtime stays fork work.
 
 ---
 
@@ -148,6 +151,8 @@ rust-claw/
     channels/
       mod.rs              #   ChannelAdapter trait + build_adapters() barrel
       web.rs              #   the built-in adapter (bridges axum ⇄ router/delivery)
+      sms.rs              #   sim-server SMS connector (M17): after_seq cursor poll +
+                          #   HMAC webhook wake-up ping; POST send. Text-only, no MMS.
     web/                  # axum: routes, SSE hub, auth middleware, embedded static UI
     commands/             # admin command registry + per-resource defs (CRUD); args carry
                           # display metadata (label, type, options) so the web admin renders
@@ -646,6 +651,19 @@ These port from the first draft with containers subtracted:
   along on the next engaging run instead of waking the agent. "Wake" means `RunQueue::enqueue`, done
   only for engaging messages. Dropped (no-wiring) messages go to the `dropped_messages` ledger. (The
   pi-era host-side command gate is N/A — the native loop has no slash commands; see M6.3.)
+- **Connectors** (M17): external channels are rows, not config. `connectors(id, kind UNIQUE,
+  label, config JSON, agent_group_id, enabled)` — one row per channel instance (the SIM, a bot),
+  CRUD via the command registry so the admin UI renders the forms for free; per-kind config is a
+  typed serde struct behind the `ConnectorKind` enum, and `build_adapters()` matches exhaustively
+  (a new kind breaks compilation until implemented). The `agent_group_id` is the **assignment**:
+  when a messaging group on that channel has no explicit wirings, the router falls back to the
+  enabled connector's agent (DM always-engage, Shared session — the wiring defaults), so
+  reassigning the connector moves the whole line in one edit; explicit per-number wirings still
+  win. Adapters are built from enabled rows at startup (a change needs a restart until the
+  optional reconciler lands). SMS inbound is **at-least-once**: the `after_seq` cursor
+  (`channel_cursors`) is persisted per message after the inbound send, so a crash can replay at
+  most one message; the webhook is a wake-up ping only — verified, then it just triggers an
+  immediate poll, never carrying message data.
 - **Delivery** (`delivery.rs`): poll `messages_out` (1s while a run is live for that session, 60s
   sweep over all active sessions), filter against `delivered`, dispatch: `system` → action registry;
   `channel_type='agent'` (delegation, `platform_id`=target group) → write into a per-source worker

@@ -379,6 +379,61 @@ to parallel runs for free. Reuses the M13 hub+SSE pattern and the M14 run-lifecy
       pulsing dot on its sidebar `.chat-link`; `idle` clears it. `.chat-link--busy` CSS (pulse). Reuses
       M14's per-chat `run` SSE — no backend change.
 
+## M17 — SMS channel via sim-server (connector abstraction)
+
+A second real `ChannelAdapter`: SMS through **sim-server** (the separate Rust daemon driving a
+Huawei E3372 dongle; authenticated HTTP API). The unit of assignment is the **connector**: one
+`connectors` row = one external channel instance = one assigned agent group, managed as data so
+the whole line moves agents in one admin edit — and so Telegram/WhatsApp later are just a new
+`ConnectorKind` variant + adapter module (the exhaustive `match` in `build_adapters()` breaks
+compilation until wired). Inbound = `GET /api/messages?after_seq=N` cursor polling (`Seq` is
+persistent + monotonic → restart-safe by construction; at-least-once, dup/loss window = one
+message) plus an HMAC-verified **webhook wake-up ping** for near-instant delivery — the cursor
+stays the single source of truth (sim-server webhooks only cover messages noticed live and retry
+twice). Outbound = `POST /api/messages {phone, content}` (server splits long texts; no MMS —
+text-only). Amends the §1 non-goal (adapters whose transport is a plain HTTP API live in trunk).
+
+- [ ] **17.1 Connectors resource + routing fallback.** Migration `007-connectors`
+      (`connectors(id, kind TEXT UNIQUE, label, config JSON, agent_group_id, enabled)`) +
+      `src/db/connectors.rs`; `ConnectorKind` enum + per-kind typed config (SMS:
+      `{base_url, token, webhook_secret?}`) in `protocol/entities.rs`; `connectors-*` CRUD in
+      `src/commands/resources.rs` (the registry-rendered admin UI picks the forms up with zero
+      `web/` changes). Router fallback: a messaging group with no wirings targets the enabled
+      connector for its `channel_type` (DM always-engage, Shared session — wiring defaults);
+      explicit wirings win. Tests: CRUD round-trip, fallback routes + enqueues, disabled
+      connector still drops "no-wiring", explicit wiring beats fallback.
+- [ ] **17.2 Cursor store + SMS pure functions.** Migration `008-channel-cursors`
+      (`channel_cursors(channel_type TEXT PRIMARY KEY, cursor INTEGER NOT NULL)`) +
+      `src/db/channel_cursors.rs` (get/upsert). `src/channels/sms.rs` skeleton: serde types for
+      sim-server payloads (`Index`/`Seq: Option<i64>`/`Smstat`/`Phone`/`Content`/`Date` renames)
+      + pure fns — `to_inbound_event` (skips empty content; phone → `platform_id`;
+      `is_group=false`), `advance_cursor` (never advances over `Seq: None`), `render_sms(kind,
+      &OutboundContent, &[OutboundFile]) -> String` (chat passthrough; question text as-is —
+      answers come back as plain inbound text, the open `questions` row expires via sweep TTL;
+      approval → "approve in the web admin" — SMS sender identity is spoofable, not an
+      authorization channel; files → "[N attachment(s) not deliverable over SMS]"). Tests:
+      table-driven over all three + cursor round-trip.
+- [ ] **17.3 SmsChannel adapter + app wiring.** `run()`: first run (no cursor row) fetches
+      `after_seq=0` and sets the cursor to max `Seq` **without routing** (no history flood);
+      then ~2 s tick, per-message send-into-mpsc → persist cursor (at-least-once), exponential
+      backoff 2 s→30 s on consecutive failures (401 once at ERROR), cancel-aware and
+      `Notify`-wakeable. `deliver()`: `render_sms` → `POST /api/messages`, 10 s timeout, non-2xx →
+      `ChannelError::Delivery` (delivery.rs's 3 attempts apply), returns `Ok(None)`. `app.rs`
+      builds adapters from enabled connector rows (restart applies changes). Tests: in-process
+      axum mock of both endpoints — first-run skip, poll → `InboundEvent` fields, cursor survives
+      a simulated restart, send body + bearer header, 500 → `Delivery` error.
+- [ ] **17.4 Webhook wake-up + docs.** `POST /api/hooks/sms` outside the login gate: verify
+      `X-Sms-Signature` = HMAC-SHA256(body, connector `webhook_secret`) constant-time; fire the
+      shared `Notify` → immediate poll. 204 valid / 401 bad-or-missing signature / 404 when no
+      SMS connector or secret is configured. New deps `hmac` + `sha2` (RustCrypto, pure Rust),
+      pinned with §13 justification. Tests: valid signature triggers an immediate fetch on the
+      mock, tampered body → 401, no secret → 404. Docs: ARCHITECTURE §10 delivery semantics
+      (at-least-once inbound, hook-as-ping), §11 (LAN-trust link to sim-server, spoofable sender
+      widens reach once assigned, HMAC hook surface), §12 config, §13 (`hmac`/`sha2`; SSE not
+      worth the reqwest `stream` feature given hook+poll).
+- [ ] **17.5 (optional) Connector reconciler.** Watch `connectors` rows and spawn/cancel adapter
+      tasks live so admin edits don't need a daemon restart.
+
 Backlog (unscheduled, from decision 001): claw-as-MCP-server as an additional control surface for
 external agents; per-group MCP server configuration (M12 ships a single global server);
 cross-turn tool-round persistence if 4.7's mitigation proves insufficient.
