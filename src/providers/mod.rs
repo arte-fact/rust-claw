@@ -51,6 +51,17 @@ pub struct QueryInput {
     pub admin: Option<AgentAdmin>,
     /// Shared MCP server, when one is connected — its tools go to every agent (M12).
     pub mcp: Option<Arc<crate::mcp::McpClient>>,
+    /// sim-server access for the SMS read/send tools, when an SMS connector is
+    /// enabled (M17). Sending also works via channel routing; this carries the
+    /// read endpoint + token.
+    pub sms: Option<SmsAccess>,
+}
+
+/// Where the SMS tools reach sim-server: base URL + a `read`/`send`-scoped token.
+#[derive(Debug, Clone)]
+pub struct SmsAccess {
+    pub base_url: String,
+    pub token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

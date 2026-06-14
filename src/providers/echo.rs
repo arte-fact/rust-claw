@@ -56,6 +56,7 @@ mod tests {
             tool_profile: crate::protocol::entities::ToolProfile::Chat,
             admin: None,
             mcp: None,
+            sms: None,
         }
     }
 

@@ -80,8 +80,8 @@ async fn progress(events: &mpsc::Sender<ProviderEvent>, message: &str) {
 /// A human phrase for the activity indicator from a tool name (native or MCP).
 fn tool_action(name: &str) -> String {
     use tools::{
-        ADMIN, ASK_USER_QUESTION, BASH, CANCEL_TASK, EDIT, LIST_TASKS, PAUSE_TASK, READ,
-        RESUME_TASK, SCHEDULE_TASK, SEND_MESSAGE, SEND_TO_AGENT, WRITE,
+        ADMIN, ASK_USER_QUESTION, BASH, CANCEL_TASK, EDIT, LIST_TASKS, PAUSE_TASK, READ, READ_SMS,
+        RESUME_TASK, SCHEDULE_TASK, SEND_MESSAGE, SEND_SMS, SEND_TO_AGENT, WRITE,
     };
     let phrase = match name {
         BASH => "running a command",
@@ -92,6 +92,8 @@ fn tool_action(name: &str) -> String {
         SCHEDULE_TASK => "scheduling a task",
         LIST_TASKS | CANCEL_TASK | PAUSE_TASK | RESUME_TASK => "managing tasks",
         SEND_TO_AGENT => "messaging another agent",
+        SEND_SMS => "sending an SMS",
+        READ_SMS => "reading the SMS inbox",
         ASK_USER_QUESTION => "asking a question",
         ADMIN => "running an admin command",
         other => {
@@ -123,12 +125,14 @@ async fn run_turn(
         input.tool_profile,
         input.admin.is_some(),
         input.mcp.as_deref(),
+        input.sms.is_some(),
     );
     let tool_context = tools::ToolContext {
         workspace: input.cwd.clone(),
         profile: input.tool_profile,
         admin: input.admin.clone(),
         mcp: input.mcp.clone(),
+        sms: input.sms.clone(),
     };
     let mut produced_message = false;
 

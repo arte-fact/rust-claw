@@ -8,7 +8,7 @@ use crate::mcp::{McpClient, McpTool, dequalify, qualify};
 use crate::protocol::content::{Operation, OutboundContent, Routing};
 use crate::protocol::entities::ToolProfile;
 use crate::protocol::frame::RequestFrame;
-use crate::providers::AgentAdmin;
+use crate::providers::{AgentAdmin, SmsAccess};
 use crate::session::{NewOutboundMessage, SessionDb};
 
 use super::client::{ToolCall, ToolDefinition};
@@ -22,6 +22,8 @@ pub const CANCEL_TASK: &str = "cancel_task";
 pub const PAUSE_TASK: &str = "pause_task";
 pub const RESUME_TASK: &str = "resume_task";
 pub const SEND_TO_AGENT: &str = "send_to_agent";
+pub const SEND_SMS: &str = "send_sms";
+pub const READ_SMS: &str = "read_sms";
 pub const ASK_USER_QUESTION: &str = "ask_user_question";
 pub const BASH: &str = "bash";
 pub const READ: &str = "read";
@@ -37,6 +39,8 @@ pub struct ToolContext {
     pub profile: ToolProfile,
     pub admin: Option<AgentAdmin>,
     pub mcp: Option<Arc<McpClient>>,
+    /// sim-server access for the SMS tools, when an SMS connector is enabled (M17).
+    pub sms: Option<SmsAccess>,
 }
 
 /// Tool surface (§8.5): messaging for everyone; bash/files for coders; the `admin`
@@ -47,6 +51,7 @@ pub fn definitions(
     profile: ToolProfile,
     admin_enabled: bool,
     mcp: Option<&McpClient>,
+    sms_enabled: bool,
 ) -> Vec<ToolDefinition> {
     let mut tools = messaging_definitions();
     if profile == ToolProfile::Coder {
@@ -55,10 +60,43 @@ pub fn definitions(
     if admin_enabled {
         tools.push(admin_definition());
     }
+    if sms_enabled {
+        tools.extend(sms_definitions());
+    }
     if let Some(client) = mcp {
         tools.extend(mcp_definitions(client.server_name(), client.tools()));
     }
     tools
+}
+
+/// The SMS tools (M17), offered only when an SMS connector is enabled: send a
+/// text to any number and read the recent inbox. Sending reuses the channel
+/// delivery path (ASCII-folded, retried); reading hits sim-server directly.
+fn sms_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::function(
+            SEND_SMS,
+            "Send an SMS text message to a phone number (E.164, e.g. +33612345678).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "Recipient phone number in E.164 format." },
+                    "text": { "type": "string", "description": "The message body." }
+                },
+                "required": ["to", "text"]
+            }),
+        ),
+        ToolDefinition::function(
+            READ_SMS,
+            "Read the most recently received SMS messages (newest last).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "How many recent messages to return (default 10, max 50)." }
+                }
+            }),
+        ),
+    ]
 }
 
 /// Turns a server's tools into model-facing definitions, names namespaced as
@@ -292,6 +330,10 @@ pub async fn dispatch(db: &Arc<SessionDb>, context: &ToolContext, call: &ToolCal
             }
         },
         BASH => bash(context, &call.function.arguments).await,
+        READ_SMS => match &context.sms {
+            Some(access) => read_sms(access, &call.function.arguments).await,
+            None => ToolOutcome::note("error: SMS is not configured for this instance"),
+        },
         READ | WRITE | EDIT => {
             let workspace = context.workspace.clone();
             let call = call.clone();
@@ -367,6 +409,7 @@ fn dispatch_messaging(db: &SessionDb, call: &ToolCall) -> ToolOutcome {
         PAUSE_TASK => task_action(db, &call.function.arguments, TaskAction::Pause),
         RESUME_TASK => task_action(db, &call.function.arguments, TaskAction::Resume),
         SEND_TO_AGENT => send_to_agent(db, &call.function.arguments),
+        SEND_SMS => send_sms(db, &call.function.arguments),
         ASK_USER_QUESTION => ask_user_question(db, &call.function.arguments),
         other => ToolOutcome::note(format!("error: unknown tool {other}")),
     }
@@ -665,6 +708,93 @@ fn send_to_agent(db: &SessionDb, arguments: &str) -> ToolOutcome {
     }
 }
 
+#[derive(Deserialize)]
+struct SendSmsArgs {
+    to: String,
+    text: String,
+}
+
+/// Sends an SMS to an arbitrary number by writing an outbound addressed at the
+/// SMS channel. Delivery (ASCII folding, retries) is the channel's job — the
+/// same path the agent's in-conversation replies take, so accents/emoji are
+/// handled and the send is logged in the session ledger.
+fn send_sms(db: &SessionDb, arguments: &str) -> ToolOutcome {
+    let args: SendSmsArgs = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    let to = args.to.trim();
+    if to.is_empty() {
+        return ToolOutcome::note("error: a recipient phone number is required");
+    }
+    let body = match serde_json::to_string(&OutboundContent::from_text(args.text)) {
+        Ok(body) => body,
+        Err(err) => return ToolOutcome::note(format!("error: {err}")),
+    };
+    let routing = Routing {
+        channel_type: Some(crate::channels::sms::CHANNEL_TYPE.to_owned()),
+        platform_id: Some(to.to_owned()),
+        thread_id: None,
+    };
+    match db.write_outbound(&NewOutboundMessage::chat(body, routing)) {
+        Ok(_) => ToolOutcome::note(format!("sms queued to {to}")),
+        Err(err) => ToolOutcome::note(format!("error: {err}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReadSmsArgs {
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Reads the recent received SMS inbox from sim-server (newest last). Read-only
+/// — it does not advance the channel's poll cursor, so it never hides messages
+/// from the normal inbound routing.
+async fn read_sms(access: &SmsAccess, arguments: &str) -> ToolOutcome {
+    let args: ReadSmsArgs = match serde_json::from_str(arguments.trim()).or_else(|_| {
+        // Tolerate an empty / absent argument object.
+        serde_json::from_str("{}")
+    }) {
+        Ok(args) => args,
+        Err(err) => return ToolOutcome::note(format!("error: bad arguments: {err}")),
+    };
+    let limit = args.limit.unwrap_or(10).clamp(1, 50) as usize;
+    let url = format!(
+        "{}/api/messages?box=inbox",
+        access.base_url.trim_end_matches('/')
+    );
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => return ToolOutcome::note(format!("error: {err}")),
+    };
+    let response = match client.get(&url).bearer_auth(&access.token).send().await {
+        Ok(response) => response,
+        Err(err) => return ToolOutcome::note(format!("error: reaching sim-server: {err}")),
+    };
+    if !response.status().is_success() {
+        return ToolOutcome::note(format!("error: sim-server returned {}", response.status()));
+    }
+    let messages: Vec<crate::channels::sms::SmsMessage> = match response.json().await {
+        Ok(messages) => messages,
+        Err(err) => return ToolOutcome::note(format!("error: bad response: {err}")),
+    };
+    if messages.is_empty() {
+        return ToolOutcome::note("inbox is empty");
+    }
+    let lines: Vec<String> = messages
+        .iter()
+        .rev()
+        .take(limit)
+        .rev()
+        .map(|m| format!("[{}] {}: {}", m.date, m.phone, m.content))
+        .collect();
+    ToolOutcome::note(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +820,7 @@ mod tests {
             profile,
             admin: None,
             mcp: None,
+            sms: None,
         };
         (tmp, Arc::new(db), context)
     }
@@ -703,9 +834,9 @@ mod tests {
 
     #[test]
     fn coder_profile_adds_execution_tools_to_the_chat_surface() {
-        let chat = definitions(ToolProfile::Chat, false, None);
+        let chat = definitions(ToolProfile::Chat, false, None, false);
         let chat = tool_names(&chat);
-        let coder = definitions(ToolProfile::Coder, false, None);
+        let coder = definitions(ToolProfile::Coder, false, None, false);
         let coder = tool_names(&coder);
         for tool in [BASH, READ, WRITE, EDIT] {
             assert!(!chat.contains(&tool), "{tool} must not be in chat");
@@ -795,6 +926,54 @@ mod tests {
         let content = OutboundContent::parse(&due[0].content).expect("content");
         assert_eq!(content.text.as_deref(), Some("hello"));
         assert_eq!(due[0].kind, "chat");
+    }
+
+    #[tokio::test]
+    async fn send_sms_writes_an_outbound_routed_to_the_sms_channel() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(
+            &db,
+            &context,
+            &call(SEND_SMS, r#"{"to":"+33612345678","text":"bonjour"}"#),
+        )
+        .await;
+        assert!(outcome.result.contains("queued"), "{}", outcome.result);
+
+        let now = db.now_timestamp().expect("now");
+        let due = db.due_outbound(&now).expect("due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].routing.channel_type.as_deref(), Some("sms"));
+        assert_eq!(due[0].routing.platform_id.as_deref(), Some("+33612345678"));
+        let content = OutboundContent::parse(&due[0].content).expect("content");
+        assert_eq!(content.text.as_deref(), Some("bonjour"));
+    }
+
+    #[tokio::test]
+    async fn send_sms_requires_a_recipient() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(&db, &context, &call(SEND_SMS, r#"{"to":"  ","text":"x"}"#)).await;
+        assert!(outcome.result.contains("error"), "{}", outcome.result);
+    }
+
+    #[tokio::test]
+    async fn read_sms_without_configured_access_is_an_error() {
+        let (_tmp, db, context) = fixture(ToolProfile::Chat);
+        let outcome = dispatch(&db, &context, &call(READ_SMS, "{}")).await;
+        assert!(
+            outcome.result.contains("not configured"),
+            "{}",
+            outcome.result
+        );
+    }
+
+    #[test]
+    fn sms_tools_appear_only_when_enabled() {
+        let off = definitions(ToolProfile::Chat, false, None, false);
+        assert!(!tool_names(&off).contains(&SEND_SMS));
+        assert!(!tool_names(&off).contains(&READ_SMS));
+        let on = definitions(ToolProfile::Chat, false, None, true);
+        assert!(tool_names(&on).contains(&SEND_SMS));
+        assert!(tool_names(&on).contains(&READ_SMS));
     }
 
     #[tokio::test]
@@ -967,9 +1146,9 @@ mod tests {
 
     #[test]
     fn admin_tool_appears_only_when_enabled() {
-        let without = definitions(ToolProfile::Chat, false, None);
+        let without = definitions(ToolProfile::Chat, false, None, false);
         assert!(!tool_names(&without).contains(&ADMIN));
-        let with = definitions(ToolProfile::Chat, true, None);
+        let with = definitions(ToolProfile::Chat, true, None, false);
         assert!(tool_names(&with).contains(&ADMIN));
     }
 
@@ -1003,6 +1182,7 @@ mod tests {
             profile: ToolProfile::Chat,
             admin: Some(admin.clone()),
             mcp: None,
+            sms: None,
         };
         (context, admin)
     }

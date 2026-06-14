@@ -159,6 +159,30 @@ impl Supervisor {
         tokio::task::spawn_blocking(move || notifier.run_failed(&group, &detail));
     }
 
+    /// The enabled SMS connector's sim-server access, for the agent's SMS tools
+    /// (M17). `None` when no SMS connector is configured — the tools then don't
+    /// appear in the agent's surface.
+    async fn resolve_sms_access(&self) -> Option<crate::providers::SmsAccess> {
+        let central = self.central.clone();
+        blocking(move || {
+            central.with(|conn| {
+                crate::db::connectors::get_enabled_by_kind(
+                    conn,
+                    crate::protocol::entities::ConnectorKind::Sms,
+                )
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(|connector| match connector.config {
+            crate::protocol::entities::ConnectorConfig::Sms(cfg) => crate::providers::SmsAccess {
+                base_url: cfg.base_url,
+                token: cfg.token,
+            },
+        })
+    }
+
     /// Builds the activity-board context for a run (M16): chat label, who delegated
     /// it, and a snippet of the work. Best-effort — purely presentational.
     async fn run_context(
@@ -288,6 +312,7 @@ impl Supervisor {
                 let ctx = self.run_context(&session, &group, &batch).await;
                 activity.started(&ctx);
             }
+            let sms = self.resolve_sms_access().await;
             let run = provider.start(QueryInput {
                 prompt: draft_prompt(&batch),
                 cwd: workspace.clone(),
@@ -298,6 +323,7 @@ impl Supervisor {
                 tool_profile: group.tool_profile,
                 admin: self.agent_admin(&session, &group),
                 mcp: self.mcp.clone(),
+                sms,
             })?;
 
             let outcome = consume_run(run, |detail| {
