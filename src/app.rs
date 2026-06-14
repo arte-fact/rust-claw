@@ -119,6 +119,7 @@ pub async fn build_with_logs(
                 groups_dir: config.groups_dir(),
                 default_endpoint: config.default_endpoint.clone(),
                 default_model: config.default_model.clone(),
+                timezone: config.timezone.clone(),
             },
         )
         .with_mcp(connect_web_mcp().await)

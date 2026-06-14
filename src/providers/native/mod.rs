@@ -117,7 +117,7 @@ async fn run_turn(
     events: &mpsc::Sender<ProviderEvent>,
 ) -> Result<(), TurnError> {
     let db = open_session_db(input.session_dir.clone()).await?;
-    let system_prompt = read_agent_md(&input.cwd);
+    let system_prompt = compose_system_prompt(input.system_context.as_deref(), &input.cwd);
     let mut messages = initial_messages(db.clone(), system_prompt).await?;
     let tools = tools::definitions(
         input.tool_profile,
@@ -230,5 +230,39 @@ fn read_agent_md(workspace: &Path) -> Option<String> {
         None
     } else {
         Some(trimmed.to_owned())
+    }
+}
+
+/// The system prompt = run context (current time, §8.4) ahead of the agent's
+/// own `AGENT.md`. Either part may be absent; the context goes first so the
+/// model always sees the clock even when a group has no `AGENT.md`.
+fn compose_system_prompt(system_context: Option<&str>, workspace: &Path) -> Option<String> {
+    match (system_context, read_agent_md(workspace)) {
+        (Some(context), Some(agent_md)) => Some(format!("{context}\n\n{agent_md}")),
+        (Some(context), None) => Some(context.to_owned()),
+        (None, agent_md) => agent_md,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compose_prepends_run_context_when_no_agent_md() {
+        let empty = std::path::Path::new("/nonexistent-workspace-xyz");
+        assert_eq!(
+            compose_system_prompt(Some("Current time: now."), empty).as_deref(),
+            Some("Current time: now.")
+        );
+        assert_eq!(compose_system_prompt(None, empty), None);
+    }
+
+    #[test]
+    fn compose_puts_context_before_agent_md() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::write(tmp.path().join("AGENT.md"), "You are Andy.").expect("write");
+        let composed = compose_system_prompt(Some("Current time: now."), tmp.path()).expect("some");
+        assert_eq!(composed, "Current time: now.\n\nYou are Andy.");
     }
 }

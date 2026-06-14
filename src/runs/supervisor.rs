@@ -53,6 +53,9 @@ pub struct RunConfig {
     pub groups_dir: std::path::PathBuf,
     pub default_endpoint: Option<String>,
     pub default_model: Option<String>,
+    /// IANA tz the agent reasons in; injected as run context so the model can
+    /// schedule tasks against the real local + UTC clock (§8.4).
+    pub timezone: String,
 }
 
 pub struct Supervisor {
@@ -290,7 +293,7 @@ impl Supervisor {
                 cwd: workspace.clone(),
                 session_dir: db.dir().to_path_buf(),
                 model: group.model.clone(),
-                system_context: None,
+                system_context: Some(time_context(&self.config.timezone)),
                 inference: inference.clone(),
                 tool_profile: group.tool_profile,
                 admin: self.agent_admin(&session, &group),
@@ -451,6 +454,19 @@ fn scaffold_workspace(workspace: &std::path::Path, group_name: &str) -> std::io:
     Ok(())
 }
 
+/// A one-line clock the agent can anchor scheduling on: local wall time (in the
+/// configured tz) plus the UTC instant a `process_after` must be expressed in.
+fn time_context(timezone: &str) -> String {
+    let now = jiff::Timestamp::now();
+    let tz = jiff::tz::TimeZone::get(timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let local = now.to_zoned(tz).strftime("%Y-%m-%d %H:%M:%S");
+    let utc = now.strftime("%Y-%m-%dT%H:%M:%SZ");
+    format!(
+        "Current time: {local} (local, timezone {timezone}) = {utc} (UTC). \
+         When scheduling tasks, express process_after as an ISO-8601 UTC timestamp."
+    )
+}
+
 fn draft_prompt(batch: &[InboundMessage]) -> String {
     batch
         .iter()
@@ -569,6 +585,7 @@ mod tests {
             groups_dir: fix._tmp.path().join("groups"),
             default_endpoint: None,
             default_model: None,
+            timezone: "UTC".to_owned(),
         }
     }
 
@@ -733,6 +750,7 @@ mod tests {
                 groups_dir: tmp.path().join("groups"),
                 default_endpoint: None,
                 default_model: None,
+                timezone: "UTC".to_owned(),
             },
             Box::new(|_| Ok(Arc::new(FailingProvider))),
         )
