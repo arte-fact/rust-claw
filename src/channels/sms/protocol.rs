@@ -73,11 +73,71 @@ pub fn advance_cursor(cursor: i64, messages: &[SmsMessage]) -> i64 {
 pub fn render_sms(delivery: &OutboundDelivery) -> String {
     let text = render_operation(&delivery.content);
     let note = attachment_note(delivery.files.len());
-    match (text.is_empty(), note) {
+    let combined = match (text.is_empty(), note) {
         (_, None) => text,
         (true, Some(note)) => note,
         (false, Some(note)) => format!("{text}\n{note}"),
+    };
+    to_gsm7_safe(&combined)
+}
+
+/// Folds outbound text to a 7-bit-ASCII subset SMS can always carry. The SIM
+/// backend forces UCS2 for any non-ASCII byte, and this firmware rejects the
+/// `AT+CSMP=...,8` that text-mode UCS2 needs (CMS ERROR 305) — so a single
+/// accent or emoji would make the whole reply undeliverable. Accents
+/// transliterate (café → cafe), common typographic punctuation maps to ASCII,
+/// and anything else (emoji, CJK) is dropped. Plain ASCII passes untouched.
+#[must_use]
+pub fn to_gsm7_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else if let Some(replacement) = transliterate(ch) {
+            out.push_str(replacement);
+        }
+        // else: drop (emoji, symbols with no ASCII equivalent)
     }
+    out
+}
+
+fn transliterate(ch: char) -> Option<&'static str> {
+    let s = match ch {
+        'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => "a",
+        'À' | 'Á' | 'Â' | 'Ä' | 'Ã' | 'Å' => "A",
+        'ç' => "c",
+        'Ç' => "C",
+        'è' | 'é' | 'ê' | 'ë' => "e",
+        'È' | 'É' | 'Ê' | 'Ë' => "E",
+        'ì' | 'í' | 'î' | 'ï' => "i",
+        'Ì' | 'Í' | 'Î' | 'Ï' => "I",
+        'ñ' => "n",
+        'Ñ' => "N",
+        'ò' | 'ó' | 'ô' | 'ö' | 'õ' => "o",
+        'Ò' | 'Ó' | 'Ô' | 'Ö' | 'Õ' => "O",
+        'ù' | 'ú' | 'û' | 'ü' => "u",
+        'Ù' | 'Ú' | 'Û' | 'Ü' => "U",
+        'ý' | 'ÿ' => "y",
+        'œ' => "oe",
+        'Œ' => "OE",
+        'æ' => "ae",
+        'Æ' => "AE",
+        'ß' => "ss",
+        '\u{2019}' | '\u{2018}' | '\u{201A}' | '`' => "'",
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '«' | '»' => "\"",
+        '\u{2013}' | '\u{2014}' | '\u{2011}' | '\u{2012}' => "-",
+        '…' => "...",
+        '•' | '·' => "-",
+        '\u{00A0}' | '\u{202F}' | '\u{2009}' => " ",
+        '€' => "EUR",
+        '£' => "GBP",
+        '°' => " deg",
+        '×' => "x",
+        '✓' | '✔' => "[ok]",
+        '→' => "->",
+        _ => return None,
+    };
+    Some(s)
 }
 
 fn render_operation(content: &OutboundContent) -> String {
@@ -208,6 +268,39 @@ mod tests {
     }
 
     #[test]
+    fn gsm7_safe_transliterates_accents_and_drops_emoji() {
+        let cases: &[(&str, &str)] = &[
+            ("plain ascii", "plain ascii"),
+            ("café déjà vu", "cafe deja vu"),
+            ("Ça coûte 5€", "Ca coute 5EUR"),
+            (
+                "\u{201C}quote\u{201D} \u{2014} dash\u{2026}",
+                "\"quote\" - dash...",
+            ),
+            ("done \u{2705} ok \u{2713}", "done  ok [ok]"),
+            ("emoji \u{1F600}\u{1F44D} gone", "emoji  gone"),
+            ("Œuvre n°1", "OEuvre n deg1"),
+        ];
+        for (input, expected) in cases {
+            let got = to_gsm7_safe(input);
+            assert!(got.is_ascii(), "output must be pure ASCII: {got:?}");
+            assert_eq!(&got, expected, "input={input:?}");
+        }
+    }
+
+    #[test]
+    fn render_sms_output_is_always_ascii() {
+        let d = OutboundDelivery {
+            kind: "chat".to_owned(),
+            content: OutboundContent::from_text("Réponse: déployé ✅ à 22°C"),
+            files: Vec::new(),
+        };
+        let out = render_sms(&d);
+        assert!(out.is_ascii(), "render_sms must yield ASCII: {out:?}");
+        assert_eq!(out, "Reponse: deploye  a 22 degC");
+    }
+
+    #[test]
     fn render_sms_covers_every_outbound_shape() {
         let question_with_text = OutboundContent {
             text: Some("Deploy now? (ship / wait)".to_owned()),
@@ -250,7 +343,7 @@ mod tests {
                 "approval points at the web admin",
                 approval,
                 0,
-                "[approval needed — use the web admin] create agent Coder",
+                "[approval needed - use the web admin] create agent Coder",
             ),
             (
                 "files become a note",
