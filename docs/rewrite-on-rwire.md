@@ -458,3 +458,70 @@ Whether the rewrite keeps *central.db + one DB per session* or collapses to a si
 (a SPEC §16 "reconsider") is independent of rwire — it's a pipeline-internal choice. rwire
 sees neither; it only ever sees the projected read-models. Decide it on the pipeline's own
 merits (isolation, file count, backup), not because of the UI framework.
+
+---
+
+## 12. rwire component map (`rwire-components` — ~50 components)
+
+The library covers most of claw's UI; we compose a few missing pieces. Components take
+handlers either as a convenience (`Button::primary("Save").on_click(save())`) or
+explicitly (`.build().on(Ev::Click, save())`).
+
+### 12.1 The core kit (≈15 components do ~90% of claw)
+
+`AppShell` · `Stack` · `Card` · `Container` · `Grid` · `Button` · `Input` · `Textarea` ·
+`Select` · `FormField` · `Table` · `Modal` · `Badge` · `Text` · `Alert`. Learn these first.
+
+### 12.2 Per-surface mapping
+
+| claw surface | rwire components |
+|---|---|
+| **App layout** | `AppShell` (`.header`/`.sidebar`/`.main`) — sticky header + chat sidebar + scrolling main |
+| **Top nav** | `NavMenu` + `NavItem` (Chat / Admin / Activity / Logs); `ThemeToggle`; `Avatar`+`Badge` |
+| **Login** | `Card` > `FormField` + `Input::password()` + `Button::primary`; `Alert` for bad token |
+| **Chat sidebar (list)** | `Stack(col)` + `Input::search()` + `List`/`ListItem` (or styled rows); `Badge` = unread; busy dot = `Badge`/styled span |
+| **Chat thread** | `Stack(col)` of message `Card`s + `Avatar` + the **markdown renderer** (§12.4); `Spinner` while the agent runs; `EmptyState` for a new chat |
+| **Chat composer** | `<form>` + `Textarea` + `Button::primary("Send")` (read-on-send, §4.1) |
+| **Question / approval card** | `Card` + `Text` + `Button`s (each posts `Command::AnswerQuestion`); `Alert` for approvals |
+| **Admin resource list** | `Card` > `Table` (`.headers`, `.row`) + `Pagination`; per-row `DropdownMenu` (Edit/Delete) or inline-edit rows; `Badge` = status |
+| **Admin create/edit** | `Modal` or `Drawer` > `FormField` × N (wrapping `Input`/`Select`/`Switch`/`Checkbox`/`Slider`) + `Button`s |
+| **Delete confirm** | `Modal` + `Alert::warning` + `Button::destructive` |
+| **Activity board** | `Grid`/`Stack` of `Card`s, `Badge` = phase, `Stat` = counts, `Spinner` = running |
+| **Logs viewer** | `Table` (or `Timeline`) + `Code::block` for JSON lines; `Tag`/`Badge` = level |
+| **Dashboard / KPIs** | `Grid` > `Stat` (`.trend`), `Progress` (e.g. context usage), `Alert` for health |
+| **Notifications** | `Toast` + `ToastContainer` ("message sent", "connection lost") |
+
+### 12.3 rwire-specific patterns to internalize
+
+- **Overlays are state-driven, not imperatively shown.** `Modal`/`Drawer`/`DropdownMenu`
+  always render their DOM; visibility is a field: `Modal::new().open(ui.modal_open)…`. To
+  open/close, a handler flips a `bool` in `#[storage(memory)] Ui`; no show()/hide() calls.
+- **`FormField` auto-wires label↔input ids** — just `.label("Endpoint").input(Input::text()…)`,
+  add `.error(msg)`/`.required(true)` for validation state (pairs with `Input::invalid`).
+- **Tables are values, not callbacks:** `Table::new().headers([…]).row(TableRow::new().cells([…]))`
+  — build rows by iterating a read-model `Vec` with `iter_with_ref()` so row actions carry
+  an `ItemRef` (type-safe index back to the handler).
+- **`Stat`/`Progress`/`Badge`/`Timeline`** are pure presentational — feed them projected
+  read-model values; they have no IO.
+- Debounce/inputs: see §4.1 (the component path is `Input::on_input_debounced(h, ms)`).
+
+### 12.4 Not provided — compose these (the real gaps)
+
+1. **No chat-input component.** Compose `Textarea` + `Button` inside a `<form>` (§4.1);
+   wrap once as an app-level `chat_input()`.
+2. **No markdown renderer — this is the notable gap.** Agent replies are markdown
+   (claw renders them server-side today). rwire gives `Code::block`/`Code::inline` but
+   nothing for headings/lists/bold/links. Build a small **`markdown → ElementBuilder`**
+   function in `ui/` (parse with a pure-Rust markdown crate; emit `Text`/`El::P`/`List`/
+   `Code::block`/`Link`). It belongs in `domain`-adjacent UI code, is pure, and is unit-
+   testable. Plan for it explicitly — it's load-bearing for the chat thread.
+3. **No chat "bubble"** — it's just a `Card` + `Avatar` + the markdown render; make a
+   `bubble(msg)` helper.
+4. **Live-updating relative timestamps** ("2m ago") — `Timeline` shows a static `.time()`
+   string; if you want it to tick, the projector updates the field, or accept static.
+
+### 12.5 Components claw won't need
+
+`Breadcrumb`, `Stepper`, `AvatarGroup`, `Image`, `Blockquote`, `Kbd`, `Footer`,
+`Accordion`, `Slider` (unless a numeric setting wants it), `CopyButton` (handy for
+showing a connector token once). Skip until a concrete need appears.
