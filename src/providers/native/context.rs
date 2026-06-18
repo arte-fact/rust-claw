@@ -44,7 +44,30 @@ pub fn build_messages(
         messages.push(ChatMessage::new(Role::System, prompt));
     }
     messages.extend(kept_newest_first.into_iter().rev());
-    messages
+    coalesce_adjacent_roles(messages)
+}
+
+/// Merges consecutive same-role messages into one. The transcript can hold two
+/// assistant turns in a row (the agent sent two replies, or a reply was rewritten
+/// by a retry) or two user turns (batched inbounds); a chat-completion endpoint
+/// then rejects the request — "cannot have 2 or more assistant messages at the
+/// end of the list" — so the run never completes. Joining their text keeps the
+/// roles strictly alternating after the system prompt.
+fn coalesce_adjacent_roles(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        match out.last_mut() {
+            Some(last) if last.role == message.role => {
+                let joined = match (last.content.take(), message.content) {
+                    (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+                    (a, b) => a.or(b),
+                };
+                last.content = joined;
+            }
+            _ => out.push(message),
+        }
+    }
+    out
 }
 
 /// The agent sees content only — routing never appears. Non-chat kinds are
@@ -168,6 +191,52 @@ mod tests {
         let messages = build_messages(None, &[inbound(0, "you", "hi"), broken], 10_000);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn consecutive_assistant_replies_are_merged() {
+        // Two outbound replies in a row (a rewrite/duplicate or a double-send)
+        // must not become two trailing assistant messages — the API rejects that.
+        let transcript = vec![
+            inbound(0, "you", "hi"),
+            outbound(1, "first reply"),
+            outbound(3, "second reply"),
+        ];
+        let messages = build_messages(Some("sys"), &transcript, 10_000);
+        let shape: Vec<(Role, &str)> = messages
+            .iter()
+            .map(|m| (m.role, m.content.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (Role::System, "sys"),
+                (Role::User, "[you] hi"),
+                (Role::Assistant, "first reply\nsecond reply"),
+            ]
+        );
+        assert_eq!(messages.last().expect("non-empty").role, Role::Assistant);
+    }
+
+    #[test]
+    fn consecutive_user_messages_are_merged() {
+        let transcript = vec![
+            inbound(0, "you", "one"),
+            inbound(2, "you", "two"),
+            outbound(3, "ok"),
+        ];
+        let messages = build_messages(None, &transcript, 10_000);
+        let shape: Vec<(Role, &str)> = messages
+            .iter()
+            .map(|m| (m.role, m.content.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (Role::User, "[you] one\n[you] two"),
+                (Role::Assistant, "ok"),
+            ]
+        );
     }
 
     #[test]

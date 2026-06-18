@@ -138,10 +138,15 @@ async fn run_turn(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         progress(events, "thinking…").await;
-        let completion = client
-            .complete(&messages, &tools)
-            .await
-            .map_err(turn_error)?;
+        let completion = match client.complete(&messages, &tools).await {
+            Ok(completion) => completion,
+            // If the agent already sent a reply this turn, a later round failing
+            // must not retry the whole turn — that re-sends the reply (duplicate
+            // SMS) and leaves two assistant messages in the transcript. The reply
+            // is out; treat the turn as done.
+            Err(_) if produced_message => return Ok(()),
+            Err(error) => return Err(turn_error(error)),
+        };
 
         if completion.tool_calls.is_empty() {
             return finish_with_fallback(&db, completion.content, produced_message).await;
