@@ -480,7 +480,7 @@ explicitly (`.build().on(Ev::Click, save())`).
 | **Top nav** | `NavMenu` + `NavItem` (Chat / Admin / Activity / Logs); `ThemeToggle`; `Avatar`+`Badge` |
 | **Login** | `Card` > `FormField` + `Input::password()` + `Button::primary`; `Alert` for bad token |
 | **Chat sidebar (list)** | `Stack(col)` + `Input::search()` + `List`/`ListItem` (or styled rows); `Badge` = unread; busy dot = `Badge`/styled span |
-| **Chat thread** | `Stack(col)` of message `Card`s + `Avatar` + the **markdown renderer** (§12.4); `Spinner` while the agent runs; `EmptyState` for a new chat |
+| **Chat thread** | `Stack(col)` of message `Card`s + `Avatar` + `Markdown` (agent replies, §12.4); `Spinner` while the agent runs; `EmptyState` for a new chat |
 | **Chat composer** | `<form>` + `Textarea` + `Button::primary("Send")` (read-on-send, §4.1) |
 | **Question / approval card** | `Card` + `Text` + `Button`s (each posts `Command::AnswerQuestion`); `Alert` for approvals |
 | **Admin resource list** | `Card` > `Table` (`.headers`, `.row`) + `Pagination`; per-row `DropdownMenu` (Edit/Delete) or inline-edit rows; `Badge` = status |
@@ -505,22 +505,32 @@ explicitly (`.build().on(Ev::Click, save())`).
   read-model values; they have no IO.
 - Debounce/inputs: see §4.1 (the component path is `Input::on_input_debounced(h, ms)`).
 
-### 12.4 Not provided — compose these (the real gaps)
+### 12.4 Markdown is provided (a `rwire-markdown` crate)
+
+Agent replies are markdown, and rwire ships a **whole `rwire-markdown` crate** (built on
+pulldown-cmark) — no need to build one:
+
+- `Markdown::new(content).size(ProseSize).build() -> ElementBuilder` — the one-liner for a
+  chat bubble: `Markdown::new(&msg.text).build()`.
+- `parse_markdown(&str) -> ParseResult { content: ElementBuilder, headings: Vec<TocEntry> }`
+  — when you also want the heading list (TOC); plus `Prose`, `TableOfContents`, frontmatter,
+  and a docs-site/search kit. Handles tables, strikethrough, task lists, fenced code with
+  language, inline code, blockquotes, wrapped in a `Prose` container.
+
+This **replaces claw's `pulldown-cmark` + HTML sanitizer** outright — and more safely:
+rwire-markdown emits an **`ElementBuilder` tree**, not an HTML string, so there's no
+`innerHTML` and no markdown-driven XSS surface to sanitize. One real subsystem deleted.
+
+### 12.5 Not provided — compose these (small gaps)
 
 1. **No chat-input component.** Compose `Textarea` + `Button` inside a `<form>` (§4.1);
    wrap once as an app-level `chat_input()`.
-2. **No markdown renderer — this is the notable gap.** Agent replies are markdown
-   (claw renders them server-side today). rwire gives `Code::block`/`Code::inline` but
-   nothing for headings/lists/bold/links. Build a small **`markdown → ElementBuilder`**
-   function in `ui/` (parse with a pure-Rust markdown crate; emit `Text`/`El::P`/`List`/
-   `Code::block`/`Link`). It belongs in `domain`-adjacent UI code, is pure, and is unit-
-   testable. Plan for it explicitly — it's load-bearing for the chat thread.
-3. **No chat "bubble"** — it's just a `Card` + `Avatar` + the markdown render; make a
+2. **No chat "bubble"** — it's just a `Card` + `Avatar` + `Markdown::new(text)`; make a
    `bubble(msg)` helper.
-4. **Live-updating relative timestamps** ("2m ago") — `Timeline` shows a static `.time()`
-   string; if you want it to tick, the projector updates the field, or accept static.
+3. **Live-updating relative timestamps** ("2m ago") — `Timeline`/your bubble show a static
+   string; to tick, the projector refreshes the field, or accept static.
 
-### 12.5 Components claw won't need
+### 12.6 Components claw won't need
 
 `Breadcrumb`, `Stepper`, `AvatarGroup`, `Image`, `Blockquote`, `Kbd`, `Footer`,
 `Accordion`, `Slider` (unless a numeric setting wants it), `CopyButton` (handy for
