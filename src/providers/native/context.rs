@@ -44,7 +44,21 @@ pub fn build_messages(
         messages.push(ChatMessage::new(Role::System, prompt));
     }
     messages.extend(kept_newest_first.into_iter().rev());
-    coalesce_adjacent_roles(messages)
+    drop_trailing_assistant(coalesce_adjacent_roles(messages))
+}
+
+/// Drop trailing assistant message(s) so the request ends with a user (or tool)
+/// turn. A chat-completion endpoint rejects a list ending in the assistant's own
+/// message — you'd be asking it to *continue* that message, not answer the user.
+/// This happens whenever a turn fires with the transcript ending in the agent's
+/// reply (e.g. a re-engaged session, or a turn that already answered). `coalesce`
+/// alone is not enough: merging two trailing replies still leaves one trailing
+/// assistant, which the endpoint still refuses.
+fn drop_trailing_assistant(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    while matches!(messages.last(), Some(message) if message.role == Role::Assistant) {
+        messages.pop();
+    }
+    messages
 }
 
 /// Merges consecutive same-role messages into one. The transcript can hold two
@@ -195,12 +209,14 @@ mod tests {
 
     #[test]
     fn consecutive_assistant_replies_are_merged() {
-        // Two outbound replies in a row (a rewrite/duplicate or a double-send)
-        // must not become two trailing assistant messages — the API rejects that.
+        // Two outbound replies in a row (a rewrite/duplicate or a double-send) must
+        // not become two adjacent assistant messages — the API needs alternating
+        // roles. A later user turn keeps the merged reply off the end of the list.
         let transcript = vec![
             inbound(0, "you", "hi"),
             outbound(1, "first reply"),
             outbound(3, "second reply"),
+            inbound(4, "you", "still there?"),
         ];
         let messages = build_messages(Some("sys"), &transcript, 10_000);
         let shape: Vec<(Role, &str)> = messages
@@ -213,9 +229,29 @@ mod tests {
                 (Role::System, "sys"),
                 (Role::User, "[you] hi"),
                 (Role::Assistant, "first reply\nsecond reply"),
+                (Role::User, "[you] still there?"),
             ]
         );
-        assert_eq!(messages.last().expect("non-empty").role, Role::Assistant);
+    }
+
+    #[test]
+    fn a_trailing_assistant_reply_is_dropped() {
+        // A turn can fire with the transcript ending in the agent's own reply (a
+        // re-engaged session, or a turn that already answered then ran again). The
+        // built list must still end with the user's turn, never the assistant's —
+        // the endpoint rejects "2 or more assistant messages at the end of the list".
+        let transcript = vec![
+            inbound(0, "you", "hi"),
+            outbound(1, "first reply"),
+            outbound(3, "second reply"),
+        ];
+        let messages = build_messages(Some("sys"), &transcript, 10_000);
+        let shape: Vec<(Role, &str)> = messages
+            .iter()
+            .map(|m| (m.role, m.content.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(shape, vec![(Role::System, "sys"), (Role::User, "[you] hi")]);
+        assert_ne!(messages.last().expect("non-empty").role, Role::Assistant);
     }
 
     #[test]
@@ -224,6 +260,7 @@ mod tests {
             inbound(0, "you", "one"),
             inbound(2, "you", "two"),
             outbound(3, "ok"),
+            inbound(4, "you", "more"),
         ];
         let messages = build_messages(None, &transcript, 10_000);
         let shape: Vec<(Role, &str)> = messages
@@ -235,6 +272,7 @@ mod tests {
             vec![
                 (Role::User, "[you] one\n[you] two"),
                 (Role::Assistant, "ok"),
+                (Role::User, "[you] more"),
             ]
         );
     }
